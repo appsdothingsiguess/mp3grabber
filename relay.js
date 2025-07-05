@@ -13,7 +13,7 @@ const PORT = 8787;
 // --- Whishper Configuration ---
 // It's good practice to use environment variables for configuration.
 const WHISHPER_API_BASE_URL = process.env.WHISHPER_API_URL || 'http://192.168.1.96:8082/api';
-const WHISHPER_SUBMIT_URL = `${WHISHPER_API_BASE_URL}/transcriptions`;
+const WHISHPER_SUBMIT_URL = `${WHISHPER_API_BASE_URL}/transcription`;
 
 // serve the viewer page
 app.get('/', (_, res) => res.sendFile(path.join(__dirname, 'viewer.html')));
