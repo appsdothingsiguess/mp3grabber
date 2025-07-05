@@ -1,0 +1,31 @@
+<!doctype html><meta charset="utf-8" />
+<h2>Incoming .mp3 links</h2><ul id="list"></ul>
+<script>
+  console.log("Viewer: Attempting to connect to WebSocket...");
+  const ul = document.getElementById('list');
+  const ws = new WebSocket(`ws://${location.host}`);
+
+  ws.onopen = () => {
+    console.log("Viewer: WebSocket connection established.");
+  };
+
+  ws.onmessage = e => {
+    console.log("Viewer: Received message:", e.data);
+    try {
+      const { url } = JSON.parse(e.data);
+      const li = document.createElement('li');
+      li.innerHTML = `<a href="${url}" target="_blank">${url}</a>`;
+      ul.prepend(li);
+    } catch (err) {
+      console.error("Viewer: Failed to parse message or update UI.", err);
+    }
+  };
+
+  ws.onerror = (error) => {
+    console.error("Viewer: WebSocket error:", error);
+  };
+
+  ws.onclose = () => {
+    console.log("Viewer: WebSocket connection closed.");
+  };
+</script>
