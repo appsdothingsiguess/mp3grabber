@@ -12,10 +12,18 @@
   ws.onmessage = e => {
     console.log("Viewer: Received message:", e.data);
     try {
-      const { url } = JSON.parse(e.data);
+      const { url, id } = JSON.parse(e.data);
+      if (!url || !id) return;
+      console.log(`Viewer: Parsed data - URL: ${url}, ID: ${id}`);
+
       const li = document.createElement('li');
-      li.innerHTML = `<a href="${url}" target="_blank">${url}</a>`;
+      li.id = `transcription-${id}`;
+      li.innerHTML = `
+        <a href="${url}" target="_blank">${url}</a>
+        <div class="transcript" style="padding: 5px; color: #555;"><em>Transcribing...</em></div>
+      `;
       ul.prepend(li);
+      poll(id); // Start polling for this transcription
     } catch (err) {
       console.error("Viewer: Failed to parse message or update UI.", err);
     }
@@ -28,4 +36,46 @@
   ws.onclose = () => {
     console.log("Viewer: WebSocket connection closed.");
   };
+
+  function showTranscript(id, content, isError = false) {
+    const transcriptDiv = document.querySelector(`#transcription-${id} .transcript`);
+    if (transcriptDiv) {
+      transcriptDiv.innerText = content;
+      if (isError) {
+        transcriptDiv.style.color = 'red';
+      } else {
+        transcriptDiv.style.color = 'black';
+      }
+    }
+  }
+
+  function poll(id) {
+    console.log(`Viewer: Polling for transcription ID: ${id}`);
+    fetch(`/api/transcriptions/${id}`)
+      .then(r => {
+        if (!r.ok) throw new Error(`Network response was not ok: ${r.statusText}`);
+        return r.json();
+      })
+      .then(data => {
+        console.log(`Viewer: Poll response for ${id}:`, data);
+        if (data && data.status === 'DONE') {
+          console.log(`Viewer: Transcription ${id} is done.`);
+          // The transcription can be a string or an array of segments
+          const transcriptText = Array.isArray(data.transcription) 
+            ? data.transcription.map(segment => segment.text).join(' ')
+            : data.transcription;
+          showTranscript(id, transcriptText);
+        } else if (data && data.status === 'FAILED') {
+          console.error(`Viewer: Transcription ${id} failed.`);
+          showTranscript(id, 'Transcription failed.', true);
+        } else {
+          console.log(`Viewer: Transcription ${id} not ready, polling again in 5s.`);
+          setTimeout(() => poll(id), 5000); // Poll again after 5 seconds
+        }
+      })
+      .catch(err => {
+        console.error(`Error polling for transcription ${id}:`, err);
+        showTranscript(id, 'Error fetching transcription.', true);
+      });
+  }
 </script>
