@@ -1,81 +1,112 @@
-<!doctype html><meta charset="utf-8" />
-<h2>Incoming .mp3 links</h2><ul id="list"></ul>
-<script>
-  console.log("Viewer: Attempting to connect to WebSocket...");
-  const ul = document.getElementById('list');
-  const ws = new WebSocket(`ws://${location.host}`);
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MP3 Transcription Viewer</title>
+    <style>
+        body { font-family: sans-serif; background-color: #1a1a1a; color: #f0f0f0; margin: 0; padding: 20px; }
+        h1 { color: #f0f0f0; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { padding: 12px; border: 1px solid #444; text-align: left; }
+        th { background-color: #333; }
+        tr:nth-child(even) { background-color: #2a2a2a; }
+        .status-processing { color: #f39c12; }
+        .status-done { color: #2ecc71; }
+        .status-failed { color: #e74c3c; }
+        .url-cell { max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .result-cell { max-width: 600px; white-space: pre-wrap; word-wrap: break-word; }
+    </style>
+</head>
+<body>
+    <h1>Transcription Status</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>URL</th>
+                <th>Status</th>
+                <th>Result</th>
+            </tr>
+        </thead>
+        <tbody id="transcription-table-body">
+            </tbody>
+    </table>
 
-  ws.onopen = () => {
-    console.log("Viewer: WebSocket connection established.");
-  };
+    <script>
+        const tbody = document.getElementById('transcription-table-body');
+        const ws = new WebSocket(`ws://${window.location.host}`);
 
-  ws.onmessage = e => {
-    console.log("Viewer: Received message:", e.data);
-    try {
-      const { url, id } = JSON.parse(e.data);
-      if (!url || !id) return;
-      console.log(`Viewer: Parsed data - URL: ${url}, ID: ${id}`);
+        ws.onopen = () => {
+            console.log('WebSocket connection established.');
+        };
 
-      const li = document.createElement('li');
-      li.id = `transcription-${id}`;
-      li.innerHTML = `
-        <a href="${url}" target="_blank">${url}</a>
-        <div class="transcript" style="padding: 5px; color: #555;"><em>Transcribing...</em></div>
-      `;
-      ul.prepend(li);
-      poll(id); // Start polling for this transcription
-    } catch (err) {
-      console.error("Viewer: Failed to parse message or update UI.", err);
-    }
-  };
+        ws.onclose = () => {
+            console.log('WebSocket connection closed.');
+            // Optional: You could show a "disconnected" message to the user.
+        };
 
-  ws.onerror = (error) => {
-    console.error("Viewer: WebSocket error:", error);
-  };
+        ws.onerror = (error) => {
+            console.error('WebSocket Error:', error);
+        };
 
-  ws.onclose = () => {
-    console.log("Viewer: WebSocket connection closed.");
-  };
+        ws.onmessage = (event) => {
+            try {
+                const message = JSON.parse(event.data);
+                console.log('Received message:', message);
 
-  function showTranscript(id, content, isError = false) {
-    const transcriptDiv = document.querySelector(`#transcription-${id} .transcript`);
-    if (transcriptDiv) {
-      transcriptDiv.innerText = content;
-      if (isError) {
-        transcriptDiv.style.color = 'red';
-      } else {
-        transcriptDiv.style.color = 'black';
-      }
-    }
-  }
+                switch (message.type) {
+                    case 'new_transcription':
+                        handleNewTranscription(message.payload);
+                        break;
+                    case 'transcription_done':
+                        handleTranscriptionDone(message.payload);
+                        break;
+                    case 'transcription_failed':
+                        handleTranscriptionFailed(message.payload);
+                        break;
+                    default:
+                        console.warn('Received unknown message type:', message.type);
+                }
+            } catch (e) {
+                console.error('Failed to parse incoming message:', event.data, e);
+            }
+        };
 
-  function poll(id) {
-    console.log(`Viewer: Polling for transcription ID: ${id}`);
-    fetch(`/api/transcriptions/${id}`)
-      .then(r => {
-        if (!r.ok) throw new Error(`Network response was not ok: ${r.statusText}`);
-        return r.json();
-      })
-      .then(data => {
-        console.log(`Viewer: Poll response for ${id}:`, data);
-        if (data && data.status === 'DONE') {
-          console.log(`Viewer: Transcription ${id} is done.`);
-          // The transcription can be a string or an array of segments
-          const transcriptText = Array.isArray(data.transcription) 
-            ? data.transcription.map(segment => segment.text).join(' ')
-            : data.transcription;
-          showTranscript(id, transcriptText);
-        } else if (data && data.status === 'FAILED') {
-          console.error(`Viewer: Transcription ${id} failed.`);
-          showTranscript(id, 'Transcription failed.', true);
-        } else {
-          console.log(`Viewer: Transcription ${id} not ready, polling again in 5s.`);
-          setTimeout(() => poll(id), 5000); // Poll again after 5 seconds
+        function handleNewTranscription({ id, url }) {
+            const newRow = document.createElement('tr');
+            newRow.id = `job-${id}`;
+            
+            newRow.innerHTML = `
+                <td class="url-cell" title="${url}">${url}</td>
+                <td id="status-${id}" class="status-processing">Processing...</td>
+                <td id="result-${id}" class="result-cell"></td>
+            `;
+
+            tbody.prepend(newRow); // Add new jobs to the top
         }
-      })
-      .catch(err => {
-        console.error(`Error polling for transcription ${id}:`, err);
-        showTranscript(id, 'Error fetching transcription.', true);
-      });
-  }
-</script>
+
+        function handleTranscriptionDone({ id, transcript }) {
+            const statusCell = document.getElementById(`status-${id}`);
+            const resultCell = document.getElementById(`result-${id}`);
+
+            if (statusCell && resultCell) {
+                statusCell.textContent = 'Done';
+                statusCell.className = 'status-done';
+                // The transcript is an array of segments, join them together.
+                resultCell.textContent = transcript.map(seg => seg.text.trim()).join(' ');
+            }
+        }
+
+        function handleTranscriptionFailed({ id, error }) {
+            const statusCell = document.getElementById(`status-${id}`);
+            const resultCell = document.getElementById(`result-${id}`);
+
+            if (statusCell && resultCell) {
+                statusCell.textContent = 'Failed';
+                statusCell.className = 'status-failed';
+                resultCell.textContent = error;
+            }
+        }
+    </script>
+</body>
+</html>
