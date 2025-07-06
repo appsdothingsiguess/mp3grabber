@@ -2,141 +2,86 @@
 
 ## Overview
 
-The MP3 Grabber is an automated transcription system that seamlessly captures MP3 audio links from web pages and transcribes them using AI-powered speech recognition. This project consists of three main components working together: a browser extension, a relay server, and integration with the Whishper transcription service.
-
-## What This Project Does
-
-1. **Detects MP3 Links**: Browser extension automatically finds MP3 audio links on any webpage
-2. **Captures & Forwards**: Sends discovered URLs to a local relay server via WebSocket
-3. **Auto-Transcribes**: Automatically submits audio files to Whishper (OpenAI Whisper) for transcription
-4. **Real-time Updates**: Displays transcription progress and results in a web interface
-5. **Batch Processing**: Handles multiple audio files simultaneously
-
-## Architecture
-
-```
-[Web Page] → [Browser Extension] → [Relay Server] → [Whishper API]
-     ↓              ↓                    ↓              ↓
-[MP3 Links]    [WebSocket]         [Express Server]  [AI Transcription]
-                    ↓                    ↓              ↓
-              [User Interface] ← [Real-time Updates] ← [Results]
-```
-
-## Components
-
-### 1. Browser Extension (`extension/`)
-
-**File**: `extension/bg.js`, `extension/manifest.json`
-
-- **Purpose**: Automatically detects MP3 links on web pages
-- **Trigger**: Keyboard shortcut (`Ctrl+Shift+M` by default)
-- **Functionality**:
-  - Scans current webpage for MP3 links in `<a>`, `<audio>`, and `<source>` elements
-  - Establishes WebSocket connection to relay server
-  - Sends discovered URLs as JSON messages
-  - Handles connection management and error recovery
-
-**Key Features**:
-- Non-intrusive: Only activates when triggered
-- Smart detection: Finds MP3 links in various HTML elements
-- Robust connectivity: Automatic reconnection handling
-- Works on most websites (respects browser security policies)
-
-### 2. Relay Server (`relay.js`)
-
-**Purpose**: Central hub that coordinates between browser extension and transcription service
-
-**Key Responsibilities**:
-- **WebSocket Server**: Receives MP3 URLs from browser extension
-- **API Gateway**: Forwards requests to Whishper transcription service
-- **Web Interface**: Serves viewer page for monitoring transcriptions
-- **Proxy Service**: Handles CORS and provides unified API access
-
-**Technical Details**:
-- Built with Express.js and WebSocket (`ws` library)
-- Runs on port 8787 by default
-- Provides REST API proxy for transcription status checks
-- Real-time broadcasting to connected viewers
-
-### 3. Viewer Interface (`viewer.html`)
-
-**Purpose**: Web-based dashboard for monitoring transcription progress
-
-**Features**:
-- **Real-time Updates**: Shows incoming MP3 URLs as they're discovered
-- **Progress Tracking**: Displays transcription status (Processing → Done/Failed)
-- **Results Display**: Shows completed transcriptions with full text
-- **Error Handling**: Clear indication of failed transcriptions
-
-### 4. Whishper Integration
-
-**Service**: [Whishper](https://github.com/pluja/whishper) - Self-hosted transcription service
-- **AI Model**: OpenAI Whisper for speech-to-text conversion
-- **Local Processing**: 100% private, no data sent to external services
-- **Multiple Languages**: Automatic language detection
-- **High Accuracy**: State-of-the-art speech recognition
+This project is an automated system designed to find, download, and transcribe MP3 audio files from any webpage. It consists of a browser extension that captures audio links, a Node.js server that manages the process, and an integration with an AI-powered speech recognition service to perform the transcription.
 
 ## How It Works
 
-### Step-by-Step Process
+The system operates through a seamless, multi-step process:
 
-1. **Discovery Phase**:
-   - User navigates to a webpage containing MP3 links
-   - Presses `Ctrl+Shift+M` to activate the extension
-   - Extension scans page DOM for MP3 URLs
+1.  **Audio Detection**: A browser extension, activated by a keyboard shortcut, scans the current webpage for any links to MP3 files.
+2.  **Link Forwarding**: The extension sends the discovered MP3 URLs to a local Node.js relay server using a WebSocket connection.
+3.  **Automatic Transcription**: The relay server downloads the audio from the URL and uses a local Whisper model to transcribe the speech into text.
+4.  **Real-time Monitoring**: A web-based viewer page displays the status of each transcription job in real-time, showing "Processing," "Done," or "Failed."
+5.  **View Results**: Once a transcription is complete, the text is displayed in the viewer.
 
-2. **Capture Phase**:
-   - Extension establishes WebSocket connection to relay server
-   - Sends discovered URLs as JSON: `{"url": "https://example.com/audio.mp3"}`
+## Architecture
 
-3. **Processing Phase**:
-   - Relay server receives URL and forwards to Whishper API
-   - Whishper downloads audio file and begins transcription
-   - API returns transcription job ID
+The project is composed of three main parts:
 
-4. **Monitoring Phase**:
-   - Relay broadcasts URL + job ID to all connected viewers
-   - Viewer interface begins polling for transcription status
-   - Real-time updates show progress
+-   **Browser Extension (`extension/`)**: A simple browser extension that finds all MP3 links on a page and sends them to the relay server.
+-   **Relay Server (`relay.js`)**: A Node.js server built with Express and WebSockets. It receives URLs from the extension, downloads the files, manages the transcription queue, and serves the viewer interface.
+-   **Viewer (`viewer.html`)**: An HTML page that connects to the relay server via WebSockets to provide a real-time view of the transcription process.
 
-5. **Completion Phase**:
-   - Whishper completes transcription and returns full text
-   - Viewer displays final transcription results
-   - User can copy/use transcribed text
+```mermaid
+graph TD
+    subgraph Browser
+        A[Web Page with MP3s] -->|User activates| B(Browser Extension);
+    end
+    subgraph Local Machine
+        C(Relay Server);
+        D(Transcription Service);
+        E(Viewer Interface);
+    end
 
-### Data Flow
-
-```
-Browser Extension → WebSocket → Relay Server → HTTP POST → Whishper API
-                                     ↓
-                              WebSocket Broadcast
-                                     ↓
-                               Viewer Interface → HTTP GET → Relay Proxy → Whishper API
+    B -->|Sends URLs via WebSocket| C;
+    C -->|Downloads audio and sends to| D;
+    C -->|Broadcasts status to| E;
+    D -->|Returns transcription to| C;
 ```
 
+## Setup & Installation
 
-## Technical Requirements
+To get the system running, follow these steps:
 
-### System Requirements
-- **Node.js**: Version 14 or higher
-- **Browser**: Chrome, Firefox, or other modern browsers
-- **Docker**: For running Whishper service
-- **Network**: Local network access between components
+### 1. Install Dependencies
 
-### Dependencies
-- **Express.js**: Web server framework
-- **WebSocket (ws)**: Real-time communication
-- **Whishper**: AI transcription service
-- **Docker Compose**: Container orchestration
+First, you need to install the necessary Node.js packages. Open a terminal in the project root and run:
 
-## Configuration
+```bash
+npm install
+```
 
-### Network Configuration
-- **Relay Server**: `localhost:8787`
-- **Whishper Service**: `192.168.1.96:8082` (configurable)
-- **WebSocket**: Same port as relay server
+### 2. Download the Transcription Model
 
-### API Endpoints
-- **Transcription Submit**: `POST /api/transcription`
-- **Status Check**: `GET /api/transcriptions/{id}`
-- **Viewer Interface**: `GET /`
+This project uses `whisper-node` for transcription, which requires a pre-trained model. A script is included in `package.json` to download the recommended model (`base.en`).
+
+Run the following command:
+
+```bash
+npm run download-model -- --model base.en
+```
+
+This will download the model and place it in the `whisper-bin` directory.
+
+### 3. Load the Browser Extension
+
+1.  Open your browser's extension management page (e.g., `chrome://extensions`).
+2.  Enable "Developer mode."
+3.  Click "Load unpacked" and select the `extension` folder from this project.
+
+### 4. Start the Server
+
+Finally, start the relay server:
+
+```bash
+npm start
+```
+
+The server will be running at `http://http://192.168.1.96/:8787`.
+
+## Usage
+
+1.  Open the viewer interface by navigating to `http://http://192.168.1.96/:8787` in your browser.
+2.  Go to any webpage that contains links to MP3 files.
+3.  Activate the extension using the shortcut `Ctrl+Shift+M` (or `Cmd+Shift+M` on Mac).
+4.  The MP3 URLs will appear in the viewer, and the transcription process will begin automatically. 
