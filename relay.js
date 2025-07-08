@@ -3,11 +3,10 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createWriteStream, unlink, existsSync, mkdirSync } from 'fs';
+import { createWriteStream, unlink, existsSync, mkdirSync, readFileSync, renameSync } from 'fs';
 import { get } from 'https';
 import { execFileSync } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
-import { readFileSync } from 'fs';
 
 // --- Setup ---
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -28,16 +27,19 @@ if (!existsSync(MODEL)) {
 }
 
 function transcribe(file) {
-    const jsonPath = file + ".json";  // Whisper saves to this automatically
+    const txtPath = file + ".txt";  // Whisper saves to this automatically
     execFileSync(
       MAIN,
-      ["-m", MODEL, "-f", file, "-oj"], // still outputs to file, not stdout
+      ["-m", MODEL, "-f", file, "-otxt"], // outputs to .txt instead of .json
       { encoding: "utf8" }
     );
-    const jsonContent = readFileSync(jsonPath, "utf8");
-    const parsed = JSON.parse(jsonContent);
-    unlink(jsonPath, () => {}); // optional cleanup
-    return parsed.text;
+    const transcript = readFileSync(txtPath, "utf8");
+    
+    // rename the output file to not have the double extension
+    const newPath = file.substring(0, file.lastIndexOf('.')) + '.txt';
+    renameSync(txtPath, newPath);
+
+    return transcript;
   }
 
 // --- Express Server ---
