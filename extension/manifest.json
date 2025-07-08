@@ -1,14 +1,38 @@
 {
     "manifest_version": 3,
-    "name": "MP3 Sniper",
+    "name": "MP3 Grabber",
     "version": "0.2",
-    "permissions": ["scripting", "activeTab"],
+    "description": "Finds all MP3s on a page, sends them to a relay for transcription.",
+    "action": {
+        "default_title": "MP3 Grabber"
+    },
+    "background": {
+        "service_worker": "bg.js"
+    },
     "commands": {
       "grab-mp3": {
         "suggested_key": { "default": "Ctrl+Shift+M" },
         "description": "Send all .mp3 links to LAN relay"
+      },
+      "send-audio": {
+        "suggested_key": { "default": "Ctrl+M" },
+        "description": "Send page audio to Whisper relay"
+      },
+      "paste-next-answer": {
+        "suggested_key": { "default": "Ctrl+Shift+L" },
+        "description": "Paste the next available answer into the focused field."
       }
     },
-    "background": { "service_worker": "bg.js" }
-  }
+    "permissions": [
+        "scripting",
+        "activeTab",
+        "downloads",
+        "clipboardWrite",
+        "notifications",
+        "offscreen"
+    ],
+    "host_permissions": [
+        "<all_urls>"
+    ]
+}
   
