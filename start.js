@@ -15,6 +15,7 @@ const rl = createInterface({
 // Configuration
 const AUDIOS_DIR = path.join(__dirname, 'audios');
 const TRANSCRIPTIONS_DIR = path.join(__dirname, 'transcriptions');
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const PYTHON_SCRIPT = path.join(__dirname, 'transcribe.py');
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 
@@ -159,18 +160,100 @@ function showLoadingAnimation(message, duration = 2000) {
   });
 }
 
+async function ensureDirectoriesAndFiles() {
+  // Create audios directory
+  if (!existsSync(AUDIOS_DIR)) {
+    mkdirSync(AUDIOS_DIR, { recursive: true });
+    log('✅ Created audios directory', 'green');
+  } else {
+    log('✅ Audios directory exists', 'green');
+  }
+
+  // Create transcriptions directory
+  if (!existsSync(TRANSCRIPTIONS_DIR)) {
+    mkdirSync(TRANSCRIPTIONS_DIR, { recursive: true });
+    log('✅ Created transcriptions directory', 'green');
+  } else {
+    log('✅ Transcriptions directory exists', 'green');
+  }
+
+  // Create uploads directory
+  if (!existsSync(UPLOADS_DIR)) {
+    mkdirSync(UPLOADS_DIR, { recursive: true });
+    log('✅ Created uploads directory', 'green');
+  } else {
+    log('✅ Uploads directory exists', 'green');
+  }
+
+  // Create config.json if it doesn't exist
+  if (!existsSync(CONFIG_FILE)) {
+    const defaultConfig = {
+      installCompleted: false,
+      lastInstallDate: null,
+      version: "1.0.0"
+    };
+    writeFileSync(CONFIG_FILE, JSON.stringify(defaultConfig, null, 2));
+    log('✅ Created config.json', 'green');
+  } else {
+    log('✅ Config file exists', 'green');
+  }
+
+  // Create README files for directories if they don't exist
+  const audiosReadme = path.join(AUDIOS_DIR, 'README.md');
+  if (!existsSync(audiosReadme)) {
+    const audiosReadmeContent = `# Audio Files Directory
+
+Place your audio files here for transcription.
+
+## Supported Formats
+- .mp3
+- .wav
+- .m4a
+- .flac
+- .ogg
+- .webm
+
+## Usage
+Run \`npm run setup\` and choose option 1 to transcribe files from this directory.
+
+## Tips
+- Use shorter audio files for faster processing
+- Higher quality audio files produce better transcriptions
+- GPU acceleration is available for faster processing
+`;
+    writeFileSync(audiosReadme, audiosReadmeContent);
+    log('✅ Created audios/README.md', 'green');
+  }
+
+  const transcriptionsReadme = path.join(TRANSCRIPTIONS_DIR, 'README.md');
+  if (!existsSync(transcriptionsReadme)) {
+    const transcriptionsReadmeContent = `# Transcriptions Directory
+
+This directory contains all transcription results.
+
+## File Format
+Each transcription file includes:
+- Metadata (device, language, confidence)
+- Timestamped segments
+- Formatted text with intelligent line breaks
+
+## File Naming
+- Local files: \`[filename].txt\`
+- Extension downloads: \`[uuid].txt\`
+
+## Viewing Transcriptions
+Open any .txt file to view the transcription results.
+`;
+    writeFileSync(transcriptionsReadme, transcriptionsReadmeContent);
+    log('✅ Created transcriptions/README.md', 'green');
+  }
+}
+
 async function checkPrerequisites(forceReinstall = false) {
   // Check if we should skip installation
   if (shouldSkipInstall(forceReinstall)) {
-    // Still need to ensure directories exist
-    if (!existsSync(AUDIOS_DIR)) {
-      mkdirSync(AUDIOS_DIR, { recursive: true });
-      log('✅ Created audios directory', 'green');
-    }
-    if (!existsSync(TRANSCRIPTIONS_DIR)) {
-      mkdirSync(TRANSCRIPTIONS_DIR, { recursive: true });
-      log('✅ Created transcriptions directory', 'green');
-    }
+    // Still need to ensure directories and files exist
+    await ensureDirectoriesAndFiles();
     // Return GPU status for skipped installs too
     return { success: true, gpuStatus: await getGPUStatus() };
   }
@@ -244,20 +327,8 @@ async function checkPrerequisites(forceReinstall = false) {
   // Verify GPU installation
   await verifyGPUInstallation();
 
-  // Create directories if they don't exist
-  if (!existsSync(AUDIOS_DIR)) {
-    mkdirSync(AUDIOS_DIR, { recursive: true });
-    log('✅ Created audios directory', 'green');
-  } else {
-    log('✅ Audios directory exists', 'green');
-  }
-
-  if (!existsSync(TRANSCRIPTIONS_DIR)) {
-    mkdirSync(TRANSCRIPTIONS_DIR, { recursive: true });
-    log('✅ Created transcriptions directory', 'green');
-  } else {
-    log('✅ Transcriptions directory exists', 'green');
-  }
+  // Create directories and files if they don't exist
+  await ensureDirectoriesAndFiles();
 
   // Mark installation as complete
   markInstallationComplete();
