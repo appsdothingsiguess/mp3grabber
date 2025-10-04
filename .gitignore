@@ -34,3 +34,7 @@ coverage/
 # Misc
 *.tgz
 *.zip
+transcriptions/*.txt
+transcriptions/*.txt
+uploads/*
+config.json
