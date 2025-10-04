@@ -27,11 +27,16 @@ def transcribe_audio(audio_file, model_size="base", use_gpu=True):
         segments, info = model.transcribe(audio_file, beam_size=5)
         
         print(f"STATUS:Processing segments...", flush=True)
-        # Collect segments
+        # Collect segments with timestamps
         transcript_text = ""
         segment_count = 0
         for segment in segments:
-            transcript_text += segment.text.strip() + " "
+            start_time = segment.start
+            end_time = segment.end
+            # Format timestamps as [MM:SS.mmm]
+            start_formatted = f"[{int(start_time//60):02d}:{start_time%60:06.3f}]"
+            end_formatted = f"[{int(end_time//60):02d}:{end_time%60:06.3f}]"
+            transcript_text += f"{start_formatted} {segment.text.strip()}\n"
             segment_count += 1
             if segment_count % 10 == 0:  # Progress update every 10 segments
                 print(f"STATUS:Processed {segment_count} segments...", flush=True)
@@ -84,8 +89,9 @@ def save_transcription(transcript, audio_file, device, compute_type, language, c
         transcriptions_dir = os.path.join(os.path.dirname(audio_file), "..", "transcriptions")
         os.makedirs(transcriptions_dir, exist_ok=True)
         
-        # Create output file path
-        output_file = os.path.join(transcriptions_dir, f"{base_name}.txt")
+        # Create output file path with timestamp suffix to avoid overwriting
+        timestamp_suffix = datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_file = os.path.join(transcriptions_dir, f"{base_name}_{timestamp_suffix}.txt")
         
         # Create header with metadata
         header = f"""Transcription Results

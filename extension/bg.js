@@ -98,6 +98,101 @@ function findAudioLinks() {
   return urls;
 }
 
+// YouTube-specific function to find audio/video elements
+function findYouTubeAudioLinks() {
+  console.log("MP3 Grabber: findYouTubeAudioLinks() executed on YouTube page");
+  
+  const audioUrls = [];
+  
+  try {
+    // Look for video elements (YouTube uses video elements for audio/video)
+    const videoElements = document.querySelectorAll('video');
+    console.log(`MP3 Grabber: Found ${videoElements.length} video elements`);
+    
+    videoElements.forEach((video, index) => {
+      if (video.src) {
+        console.log(`MP3 Grabber: Video element ${index + 1} src:`, video.src);
+        audioUrls.push(video.src);
+      }
+      
+      // Check for source elements within video
+      const sources = video.querySelectorAll('source');
+      sources.forEach((source, sourceIndex) => {
+        if (source.src) {
+          console.log(`MP3 Grabber: Source element ${sourceIndex + 1} src:`, source.src);
+          audioUrls.push(source.src);
+        }
+      });
+    });
+    
+    // Look for YouTube's internal video player data
+    const videoPlayer = document.querySelector('#movie_player, .html5-video-player');
+    if (videoPlayer) {
+      console.log('MP3 Grabber: Found YouTube video player');
+      
+      // Try to access YouTube's internal video data
+      try {
+        const videoData = window.ytplayer?.config?.args || 
+                         window.ytInitialPlayerResponse ||
+                         window.ytInitialData;
+        
+        if (videoData) {
+          console.log('MP3 Grabber: Found YouTube video data');
+          
+          // Extract video URLs from YouTube's data structure
+          if (videoData.streamingData && videoData.streamingData.formats) {
+            videoData.streamingData.formats.forEach((format, index) => {
+              if (format.url) {
+                console.log(`MP3 Grabber: YouTube format ${index + 1} URL:`, format.url);
+                audioUrls.push(format.url);
+              }
+            });
+          }
+          
+          if (videoData.streamingData && videoData.streamingData.adaptiveFormats) {
+            videoData.streamingData.adaptiveFormats.forEach((format, index) => {
+              if (format.url) {
+                console.log(`MP3 Grabber: YouTube adaptive format ${index + 1} URL:`, format.url);
+                audioUrls.push(format.url);
+              }
+            });
+          }
+        }
+      } catch (error) {
+        console.log('MP3 Grabber: Could not access YouTube internal data:', error.message);
+      }
+    }
+    
+    // Look for blob URLs (YouTube often uses these)
+    const allElements = document.querySelectorAll('*');
+    allElements.forEach((element) => {
+      ['src', 'href'].forEach(attr => {
+        const url = element[attr];
+        if (url && url.startsWith('blob:')) {
+          console.log(`MP3 Grabber: Found blob URL:`, url);
+          audioUrls.push(url);
+        }
+      });
+    });
+    
+  } catch (error) {
+    console.error('MP3 Grabber: Error searching for YouTube audio elements:', error);
+  }
+  
+  // Remove duplicates and filter valid URLs
+  const uniqueUrls = [...new Set(audioUrls)].filter(url => {
+    return url && (
+      url.includes('youtube.com') || 
+      url.includes('googlevideo.com') ||
+      url.startsWith('blob:') ||
+      url.match(/\.(mp3|m4a|wav|flac|ogg|webm)(\?|$)/i)
+    );
+  });
+  
+  console.log(`MP3 Grabber: Found ${uniqueUrls.length} unique YouTube audio/video URLs:`, uniqueUrls);
+  return uniqueUrls;
+}
+
 chrome.commands.onCommand.addListener(async cmd => {
   console.log(`MP3 Grabber: Command received: ${cmd}`);
   if (cmd !== "grab-mp3") {
@@ -136,43 +231,138 @@ chrome.commands.onCommand.addListener(async cmd => {
     return;
   }
 
+  // Check if this is a YouTube page
+  const isYouTube = tab.url && (tab.url.includes('youtube.com') || tab.url.includes('youtu.be'));
+  
   console.log(`MP3 Grabber: Executing script on tab ${tab.id} (${tab.url})`);
+  console.log(`MP3 Grabber: Is YouTube page: ${isYouTube}`);
+  
   try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: findAudioLinks
-    });
+    let results;
+    
+    if (isYouTube) {
+      // For YouTube pages, try to use the content script first
+      console.log("MP3 Grabber: Attempting to communicate with YouTube content script...");
+      console.log("MP3 Grabber: Tab ID:", tab.id);
+      console.log("MP3 Grabber: Tab URL:", tab.url);
+      
+      try {
+        // Inject content script and communicate immediately
+        console.log("MP3 Grabber: Injecting content script...");
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ['content.js']
+        });
+        console.log("MP3 Grabber: Content script injected successfully");
+        
+        // Wait briefly for script to initialize
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Send message to content script
+        console.log("MP3 Grabber: Sending message to content script...");
+        const response = await chrome.tabs.sendMessage(tab.id, { action: 'findAudioLinks' });
+        console.log("MP3 Grabber: Content script response:", response);
+        
+        if (response && response.success && response.audioData) {
+          console.log("MP3 Grabber: Content script succeeded, using its data");
+          results = [{ result: response.audioData }];
+        } else {
+          // Fallback to injected script
+          console.log("MP3 Grabber: Content script failed, falling back to injected script...");
+          console.log("MP3 Grabber: Response was:", response);
+          results = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: findYouTubeAudioLinks
+          });
+        }
+      } catch (contentScriptError) {
+        console.log("MP3 Grabber: Content script communication failed, using injected script");
+        console.log("MP3 Grabber: Error details:", contentScriptError);
+        console.log("MP3 Grabber: Error message:", contentScriptError.message);
+        console.log("MP3 Grabber: Error name:", contentScriptError.name);
+        results = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: findYouTubeAudioLinks
+        });
+      }
+    } else {
+      // For non-YouTube pages, use the original method
+      results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: findAudioLinks
+      });
+    }
 
     console.log("MP3 Grabber: Script execution results:", results);
 
     // The result from a single frame execution is in results[0].
     if (results && results[0] && results[0].result) {
-      const urls = results[0].result;
-      console.log(`MP3 Grabber: Found ${urls.length} audio link(s):`, urls);
+      const audioData = results[0].result;
+      console.log(`MP3 Grabber: Found ${audioData.length} audio element(s):`, audioData);
       
-      if (urls.length === 0) {
-        console.log("MP3 Grabber: No audio links found on the page.");
-        console.log("MP3 Grabber: This might be because:");
-        console.log("  - The page doesn't contain direct audio file links");
-        console.log("  - Audio files are loaded dynamically via JavaScript");
-        console.log("  - The audio is embedded in a different format");
+      if (audioData.length === 0) {
+        console.log("MP3 Grabber: No audio elements found on the page.");
+        if (isYouTube) {
+          console.log("MP3 Grabber: YouTube-specific issues:");
+          console.log("  - YouTube may have updated their player structure");
+          console.log("  - Video may not be fully loaded yet");
+          console.log("  - YouTube's CSP may be blocking access");
+          console.log("  - Try refreshing the page and waiting for video to load");
+        } else {
+          console.log("MP3 Grabber: This might be because:");
+          console.log("  - The page doesn't contain direct audio file links");
+          console.log("  - Audio files are loaded dynamically via JavaScript");
+          console.log("  - The audio is embedded in a different format");
+        }
         return;
       }
       
-      urls.forEach((url, index) => {
-        console.log(`MP3 Grabber: Processing URL ${index + 1}/${urls.length}: ${url}`);
+      // Process audio data sequentially to handle blob-url conversions
+      for (let index = 0; index < audioData.length; index++) {
+        const item = audioData[index];
+        console.log(`MP3 Grabber: Processing audio element ${index + 1}/${audioData.length}:`, item);
+        
         if (activeSocket.readyState === WebSocket.OPEN) {
-          console.log(`MP3 Grabber: Sending URL via WebSocket: ${url}`);
-          const message = JSON.stringify({ url });
-          console.log(`MP3 Grabber: Sending message: ${message}`);
-          activeSocket.send(message);
-          console.log(`MP3 Grabber: Message sent successfully`);
+          let message;
+          
+          if (item.type === 'blob') {
+            // Send blob data directly
+            message = JSON.stringify({ 
+              type: 'blob',
+              data: item.data,
+              mimeType: item.mimeType,
+              size: item.size,
+              originalUrl: item.originalUrl,
+              element: item.element,
+              source: isYouTube ? 'youtube' : 'web',
+              pageUrl: tab.url,
+              timestamp: Date.now()
+            });
+            console.log(`MP3 Grabber: Sending blob data (${item.size} bytes, ${item.mimeType})`);
+          } else if (item.type === 'url') {
+            // Send regular URL
+            message = JSON.stringify({ 
+              type: 'url',
+              url: item.url,
+              element: item.element,
+              quality: item.quality,
+              source: isYouTube ? 'youtube' : 'web',
+              pageUrl: tab.url,
+              timestamp: Date.now()
+            });
+            console.log(`MP3 Grabber: Sending URL: ${item.url}`);
+          }
+          
+          if (message) {
+            activeSocket.send(message);
+            console.log(`MP3 Grabber: Message sent successfully`);
+          }
         } else {
-          console.warn(`MP3 Grabber: WebSocket not open. readyState: ${activeSocket.readyState}. Cannot send URL: ${url}`);
+          console.warn(`MP3 Grabber: WebSocket not open. readyState: ${activeSocket.readyState}. Cannot send audio element:`, item);
         }
-      });
+      }
     } else {
-      console.log("MP3 Grabber: No audio links found on the page.");
+      console.log("MP3 Grabber: No audio elements found on the page.");
       console.log("MP3 Grabber: Script execution returned:", results);
     }
   } catch (error) {
