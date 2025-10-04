@@ -40,12 +40,27 @@ function connect() {
   });
 }
 
-// This function is injected into the active tab to find MP3 links.
-function findMp3Links() {
+// This function is injected into the active tab to find audio links.
+function findAudioLinks() {
   const selectors = [
     'a[href$=".mp3"]',
+    'a[href$=".m4a"]',
+    'a[href$=".wav"]',
+    'a[href$=".flac"]',
+    'a[href$=".ogg"]',
+    'a[href$=".webm"]',
     'audio[src$=".mp3"]',
-    'source[src$=".mp3"]'
+    'audio[src$=".m4a"]',
+    'audio[src$=".wav"]',
+    'audio[src$=".flac"]',
+    'audio[src$=".ogg"]',
+    'audio[src$=".webm"]',
+    'source[src$=".mp3"]',
+    'source[src$=".m4a"]',
+    'source[src$=".wav"]',
+    'source[src$=".flac"]',
+    'source[src$=".ogg"]',
+    'source[src$=".webm"]'
   ];
   const elements = document.querySelectorAll(selectors.join(', '));
   // The `href` or `src` property provides the absolute URL.
@@ -79,7 +94,7 @@ chrome.commands.onCommand.addListener(async cmd => {
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: findMp3Links
+      func: findAudioLinks
     });
 
     console.log("MP3 Grabber: Script execution results:", results);
@@ -87,7 +102,7 @@ chrome.commands.onCommand.addListener(async cmd => {
     // The result from a single frame execution is in results[0].
     if (results && results[0] && results[0].result) {
       const urls = results[0].result;
-      console.log(`MP3 Grabber: Found ${urls.length} MP3 link(s).`);
+      console.log(`MP3 Grabber: Found ${urls.length} audio link(s).`);
       urls.forEach(url => {
         if (activeSocket.readyState === WebSocket.OPEN) {
           console.log(`MP3 Grabber: Sending URL via WebSocket: ${url}`);
@@ -97,7 +112,7 @@ chrome.commands.onCommand.addListener(async cmd => {
         }
       });
     } else {
-      console.log("MP3 Grabber: No MP3 links found on the page.");
+      console.log("MP3 Grabber: No audio links found on the page.");
     }
   } catch (error) {
     // This can happen on restricted pages like the Chrome Web Store.

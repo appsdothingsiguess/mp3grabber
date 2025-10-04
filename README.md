@@ -1,142 +1,153 @@
-# MP3 Grabber & Auto-Transcription System NEW WORKING
+# MP3 Grabber & Auto-Transcription System
 
 ## Overview
 
-The MP3 Grabber is an automated transcription system that seamlessly captures MP3 audio links from web pages and transcribes them using AI-powered speech recognition. This project consists of three main components working together: a browser extension, a relay server, and integration with the Whishper transcription service.
+The MP3 Grabber is an automated transcription system that captures MP3 audio links from web pages and transcribes them using **[faster-whisper](https://github.com/SYSTRAN/faster-whisper)** - a high-performance implementation of OpenAI's Whisper model with GPU acceleration support.
 
-## What This Project Does
+## Prerequisites
 
-1. **Detects MP3 Links**: Browser extension automatically finds MP3 audio links on any webpage
-2. **Captures & Forwards**: Sends discovered URLs to a local relay server via WebSocket
-3. **Auto-Transcribes**: Automatically submits audio files to Whishper (OpenAI Whisper) for transcription
-4. **Real-time Updates**: Displays transcription progress and results in a web interface
-5. **Batch Processing**: Handles multiple audio files simultaneously
+**Before running this project, you must have:**
 
-## Architecture
+- **Node.js** (version 14 or higher) - [Download here](https://nodejs.org/)
+- **Python** (version 3.9 or higher) - [Download here](https://python.org/)
+- **NVIDIA GPU** (optional) - For GPU acceleration
 
-```
-[Web Page] → [Browser Extension] → [Relay Server] → [Whishper API]
-     ↓              ↓                    ↓              ↓
-[MP3 Links]    [WebSocket]         [Express Server]  [AI Transcription]
-                    ↓                    ↓              ↓
-              [User Interface] ← [Real-time Updates] ← [Results]
+## Quick Start
+
+### One-Time Setup Command
+
+```bash
+npm run setup
 ```
 
-## Components
+### Force Reinstall (if needed)
 
-### 1. Browser Extension (`extension/`)
+```bash
+npm run setup:install
+```
 
-**File**: `extension/bg.js`, `extension/manifest.json`
+**That's it!** This single command will:
+1. ✅ Check prerequisites (Node.js, Python)
+2. 📦 Install all dependencies automatically
+3. 🎮 Detect NVIDIA GPU and install CUDA libraries
+4. 🐍 Set up faster-whisper with GPU support
+5. 📁 Create necessary folders
+6. 🚀 Present you with transcription options
 
-- **Purpose**: Automatically detects MP3 links on web pages
-- **Trigger**: Keyboard shortcut (`Ctrl+Shift+M` by default)
-- **Functionality**:
-  - Scans current webpage for MP3 links in `<a>`, `<audio>`, and `<source>` elements
-  - Establishes WebSocket connection to relay server
-  - Sends discovered URLs as JSON messages
-  - Handles connection management and error recovery
+### What You Get
 
-**Key Features**:
-- Non-intrusive: Only activates when triggered
-- Smart detection: Finds MP3 links in various HTML elements
-- Robust connectivity: Automatic reconnection handling
-- Works on most websites (respects browser security policies)
+After running `npm run setup`, you can choose:
 
-### 2. Relay Server (`relay.js`)
-
-**Purpose**: Central hub that coordinates between browser extension and transcription service
-
-**Key Responsibilities**:
-- **WebSocket Server**: Receives MP3 URLs from browser extension
-- **API Gateway**: Forwards requests to Whishper transcription service
-- **Web Interface**: Serves viewer page for monitoring transcriptions
-- **Proxy Service**: Handles CORS and provides unified API access
-
-**Technical Details**:
-- Built with Express.js and WebSocket (`ws` library)
-- Runs on port 8787 by default
-- Provides REST API proxy for transcription status checks
-- Real-time broadcasting to connected viewers
-
-### 3. Viewer Interface (`viewer.html`)
-
-**Purpose**: Web-based dashboard for monitoring transcription progress
-
-**Features**:
-- **Real-time Updates**: Shows incoming MP3 URLs as they're discovered
-- **Progress Tracking**: Displays transcription status (Processing → Done/Failed)
-- **Results Display**: Shows completed transcriptions with full text
-- **Error Handling**: Clear indication of failed transcriptions
-
-### 4. Whishper Integration
-
-**Service**: [Whishper](https://github.com/pluja/whishper) - Self-hosted transcription service
-- **AI Model**: OpenAI Whisper for speech-to-text conversion
-- **Local Processing**: 100% private, no data sent to external services
-- **Multiple Languages**: Automatic language detection
-- **High Accuracy**: State-of-the-art speech recognition
+1. **📁 File Transcription**: Process audio files from the `audios/` folder
+2. **🌐 Extension Mode**: Start server for browser extension
+3. **❌ Exit**: Close the application
 
 ## How It Works
 
-### Step-by-Step Process
+### File Transcription Mode
+1. Place audio files in the `audios/` folder
+2. Run `npm run setup` → Select option 1
+3. Choose your audio file
+4. Watch real-time progress with GPU/CPU status
+5. Get transcription saved to `transcriptions/` folder
 
-1. **Discovery Phase**:
-   - User navigates to a webpage containing MP3 links
-   - Presses `Ctrl+Shift+M` to activate the extension
-   - Extension scans page DOM for MP3 URLs
+### Extension Mode
+1. Run `npm run setup` → Select option 2
+2. Install browser extension from `extension/` folder
+3. Navigate to any webpage with MP3 links
+4. Press `Ctrl+Shift+M` to capture and transcribe
+5. View results in real-time web interface
 
-2. **Capture Phase**:
-   - Extension establishes WebSocket connection to relay server
-   - Sends discovered URLs as JSON: `{"url": "https://example.com/audio.mp3"}`
+## Features
 
-3. **Processing Phase**:
-   - Relay server receives URL and forwards to Whishper API
-   - Whishper downloads audio file and begins transcription
-   - API returns transcription job ID
+### 🚀 **High Performance**
+- **4x faster** than original Whisper
+- **50% less memory** usage
+- **GPU acceleration** with NVIDIA CUDA support
+- **Automatic CPU fallback** if GPU unavailable
 
-4. **Monitoring Phase**:
-   - Relay broadcasts URL + job ID to all connected viewers
-   - Viewer interface begins polling for transcription status
-   - Real-time updates show progress
+### 🎯 **Smart Processing**
+- **Real-time progress bars** during transcription
+- **GPU/CPU status display** 
+- **Automatic language detection**
+- **High accuracy** speech recognition
 
-5. **Completion Phase**:
-   - Whishper completes transcription and returns full text
-   - Viewer displays final transcription results
-   - User can copy/use transcribed text
+### 🔒 **Privacy & Security**
+- **100% local processing** - no data sent to external services
+- **Temporary files** automatically cleaned up
+- **Your data stays on your machine**
 
-### Data Flow
+### 📁 **Organized Output**
+- All transcriptions saved to `transcriptions/` folder
+- Original audio files remain in `audios/` folder
+- Clean, organized file structure
+
+## Supported Audio Formats
+
+The system supports all these formats for both file transcription and browser extension:
+
+- **MP3** (`.mp3`) - Most common
+- **WAV** (`.wav`) - Uncompressed
+- **M4A** (`.m4a`) - Apple format ⭐ *Now supported by browser extension*
+- **FLAC** (`.flac`) - Lossless
+- **OGG** (`.ogg`) - Open source
+- **WebM** (`.webm`) - Web format
+
+## File Structure
 
 ```
-Browser Extension → WebSocket → Relay Server → HTTP POST → Whishper API
-                                     ↓
-                              WebSocket Broadcast
-                                     ↓
-                               Viewer Interface → HTTP GET → Relay Proxy → Whishper API
+mp3grabber/
+├── audios/              # Place your audio files here
+├── transcriptions/      # All transcription results saved here
+├── extension/           # Browser extension files
+├── relay.js            # Main server
+├── start.js            # Setup script
+└── viewer.html         # Web interface
 ```
 
+## Troubleshooting
 
-## Technical Requirements
+### Common Issues
 
-### System Requirements
-- **Node.js**: Version 14 or higher
-- **Browser**: Chrome, Firefox, or other modern browsers
-- **Docker**: For running Whishper service
-- **Network**: Local network access between components
+**"Python not found"**
+- Install Python 3.9+ from [python.org](https://python.org/)
+- Make sure Python is added to your system PATH
 
-### Dependencies
-- **Express.js**: Web server framework
-- **WebSocket (ws)**: Real-time communication
-- **Whishper**: AI transcription service
-- **Docker Compose**: Container orchestration
+**"Node.js not found"**
+- Install Node.js 14+ from [nodejs.org](https://nodejs.org/)
 
-## Configuration
+**"GPU not working"**
+- Install NVIDIA drivers and CUDA toolkit
+- System will automatically fallback to CPU mode
+- CPU mode works perfectly, just slower
 
-### Network Configuration
-- **Relay Server**: `localhost:8787`
-- **Whishper Service**: `192.168.1.96:8082` (configurable)
-- **WebSocket**: Same port as relay server
+**"No audio files found"**
+- Place supported audio files in the `audios/` folder
+- Supported formats: .mp3, .wav, .m4a, .flac, .ogg, .webm
 
-### API Endpoints
-- **Transcription Submit**: `POST /api/transcription`
-- **Status Check**: `GET /api/transcriptions/{id}`
-- **Viewer Interface**: `GET /`
+### Performance Tips
+
+- **GPU**: Use NVIDIA GPU for 4x faster processing
+- **File Size**: Smaller files process faster
+- **Memory**: Ensure sufficient RAM for model loading
+- **CPU**: Close other applications to free up resources
+
+## Manual Commands (Advanced)
+
+If you prefer manual setup:
+
+```bash
+# Install dependencies
+npm install
+pip install faster-whisper
+
+# Install GPU libraries (optional)
+pip install nvidia-cublas-cu12 nvidia-cudnn-cu12==9.*
+
+# Start relay server
+npm start
+```
+
+## License
+
+This project is open source. Please ensure you comply with OpenAI's Whisper license terms when using the Whisper models.

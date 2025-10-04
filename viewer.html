@@ -92,8 +92,8 @@
             if (statusCell && resultCell) {
                 statusCell.textContent = 'Done';
                 statusCell.className = 'status-done';
-                // The transcript is an array of segments, join them together.
-                resultCell.textContent = transcript.map(seg => seg.text.trim()).join(' ');
+                // The transcript is a string from native Whisper CLI
+                resultCell.textContent = transcript;
             }
         }
 

@@ -6,7 +6,7 @@
     "commands": {
       "grab-mp3": {
         "suggested_key": { "default": "Ctrl+Shift+M" },
-        "description": "Send all .mp3 links to LAN relay"
+        "description": "Send all audio links (.mp3, .m4a, .wav, .flac, .ogg, .webm) to LAN relay"
       }
     },
     "background": { "service_worker": "bg.js" }
