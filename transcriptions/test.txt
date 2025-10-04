@@ -1,9 +1,0 @@
-Transcription Results
-Generated: 2025-10-04 02:37:25
-Source: test.mp3
-Device: CPU
-Compute Type: int8
-Language: en (95.6% confidence)
-
---- TRANSCRIPTION ---
-[00:00] Hello testing one two three testing one two three. This is a test art
