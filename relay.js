@@ -171,19 +171,46 @@ if __name__ == "__main__":
 
 function transcribe(file) {
     try {
+        console.log(`Relay: Executing Python script for file: ${file}`);
         const result = execSync(`python "${PYTHON_SCRIPT}" "${file}"`, {
             encoding: "utf8",
             cwd: __dirname
         });
         
-        const transcriptionResult = JSON.parse(result.trim());
+        console.log(`Relay: Python script output length: ${result.length}`);
+        console.log(`Relay: Python script raw output:`, result);
         
-        if (transcriptionResult.success) {
-            return transcriptionResult.transcript;
+        // Parse the output to extract JSON result
+        const lines = result.trim().split('\n');
+        let jsonResult = null;
+        
+        // Find the JSON line (should be the last line that starts with {)
+        for (let i = lines.length - 1; i >= 0; i--) {
+            const line = lines[i].trim();
+            if (line.startsWith('{') && line.endsWith('}')) {
+                try {
+                    jsonResult = JSON.parse(line);
+                    console.log(`Relay: Found JSON result:`, jsonResult);
+                    break;
+                } catch (parseError) {
+                    console.log(`Relay: Failed to parse line as JSON: ${line}`);
+                    continue;
+                }
+            }
+        }
+        
+        if (!jsonResult) {
+            throw new Error(`No valid JSON found in output. Raw output: ${result}`);
+        }
+        
+        if (jsonResult.success) {
+            console.log(`Relay: Transcription successful, transcript length: ${jsonResult.transcript?.length || 0}`);
+            return jsonResult.transcript;
         } else {
-            throw new Error(transcriptionResult.error);
+            throw new Error(jsonResult.error || 'Transcription failed');
         }
     } catch (error) {
+        console.error(`Relay: Transcription error:`, error);
         throw new Error(`Transcription failed: ${error.message}`);
     }
 }
@@ -195,6 +222,23 @@ const server = app.listen(PORT, () => {
   console.log(`Relay server listening on port ${PORT}`);
   if (!existsSync(UPLOADS_DIR)) mkdirSync(UPLOADS_DIR);
   if (!existsSync(TRANSCRIPTIONS_DIR)) mkdirSync(TRANSCRIPTIONS_DIR);
+});
+
+// Handle graceful shutdown
+process.on('SIGINT', () => {
+  console.log('\n🛑 Shutting down relay server...');
+  server.close(() => {
+    console.log('✅ Relay server closed');
+    process.exit(0);
+  });
+});
+
+process.on('SIGTERM', () => {
+  console.log('\n🛑 Received SIGTERM, shutting down relay server...');
+  server.close(() => {
+    console.log('✅ Relay server closed');
+    process.exit(0);
+  });
 });
 
 server.on('upgrade', (req, sock, head) => {
@@ -220,66 +264,91 @@ function downloadFile(url, dest) {
 // --- WebSocket Server Logic ---
 wss.on('connection', ws => {
   console.log('Relay client connected.');
-  ws.on('close', () => console.log('Relay client disconnected.'));
-  ws.on('error', error => console.error('WebSocket Error:', error));
+  console.log('Relay: WebSocket connection established from:', ws._socket?.remoteAddress);
+  
+  ws.on('close', (code, reason) => {
+    console.log('Relay client disconnected.', { code, reason: reason.toString() });
+  });
+  
+  ws.on('error', error => {
+    console.error('WebSocket Error:', error);
+  });
 
   ws.on('message', async msg => {
     const messageString = msg.toString();
-    console.log('Relay received:', messageString);
-
-    const { url } = JSON.parse(messageString);
-    if (!url) {
-      console.warn('Received message without a URL.');
-      return;
-    }
-
-    const jobId = uuidv4();
-    let localFilePath = '';
+    console.log('Relay received message:', messageString);
+    console.log('Relay: Message length:', messageString.length);
+    console.log('Relay: Message type:', typeof messageString);
 
     try {
-      console.log(`Starting job ${jobId} for URL: ${url}`);
-      const startMessage = JSON.stringify({
-        type: 'new_transcription',
-        payload: { url, id: jobId }
-      });
-      wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) client.send(startMessage);
-      });
-
-      const fileExtension = path.extname(new URL(url).pathname);
-      localFilePath = path.join(UPLOADS_DIR, `${jobId}${fileExtension}`);
-      console.log(`[${jobId}] Downloading file to: ${localFilePath}`);
-      await downloadFile(url, localFilePath);
-      console.log(`[${jobId}] Download complete.`);
-
-      console.log(`[${jobId}] Starting transcription...`);
-      const transcript = transcribe(localFilePath);
-      console.log(`[${jobId}] Transcription complete.`);
-
-      const resultMessage = JSON.stringify({
-        type: 'transcription_done',
-        payload: { id: jobId, transcript }
-      });
-      wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) client.send(resultMessage);
-      });
-
-    } catch (e) {
-      console.error(`[${jobId}] Failed to process message:`, e);
-      const errorMessage = JSON.stringify({
-        type: 'transcription_failed',
-        payload: { id: jobId, error: e.message }
-      });
-      wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
-      });
-    } finally {
-      if (localFilePath) {
-        unlink(localFilePath, err => {
-          if (err) console.error(`[${jobId}] Error deleting temp file:`, err);
-          else console.log(`[${jobId}] Cleaned up temp file: ${localFilePath}`);
-        });
+      const parsedMessage = JSON.parse(messageString);
+      console.log('Relay: Parsed message:', parsedMessage);
+      
+      const { url } = parsedMessage;
+      if (!url) {
+        console.warn('Relay: Received message without a URL.');
+        console.warn('Relay: Message structure:', parsedMessage);
+        return;
       }
+
+      console.log('Relay: Processing URL:', url);
+      console.log('Relay: URL type:', typeof url);
+      console.log('Relay: URL length:', url.length);
+
+      const jobId = uuidv4();
+      let localFilePath = '';
+
+      try {
+        console.log(`Relay: Starting job ${jobId} for URL: ${url}`);
+        const startMessage = JSON.stringify({
+          type: 'new_transcription',
+          payload: { url, id: jobId }
+        });
+        console.log(`Relay: Sending start message: ${startMessage}`);
+        wss.clients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) client.send(startMessage);
+        });
+
+        const fileExtension = path.extname(new URL(url).pathname);
+        localFilePath = path.join(UPLOADS_DIR, `${jobId}${fileExtension}`);
+        console.log(`Relay: [${jobId}] Downloading file to: ${localFilePath}`);
+        await downloadFile(url, localFilePath);
+        console.log(`Relay: [${jobId}] Download complete.`);
+
+        console.log(`Relay: [${jobId}] Starting transcription...`);
+        const transcript = transcribe(localFilePath);
+        console.log(`Relay: [${jobId}] Transcription complete.`);
+
+        const resultMessage = JSON.stringify({
+          type: 'transcription_done',
+          payload: { id: jobId, transcript }
+        });
+        console.log(`Relay: [${jobId}] Sending result message: ${resultMessage}`);
+        wss.clients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) client.send(resultMessage);
+        });
+
+      } catch (e) {
+        console.error(`Relay: [${jobId}] Failed to process message:`, e);
+        const errorMessage = JSON.stringify({
+          type: 'transcription_failed',
+          payload: { id: jobId, error: e.message }
+        });
+        console.log(`Relay: [${jobId}] Sending error message: ${errorMessage}`);
+        wss.clients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
+        });
+      } finally {
+        if (localFilePath) {
+          unlink(localFilePath, err => {
+            if (err) console.error(`Relay: [${jobId}] Error deleting temp file:`, err);
+            else console.log(`Relay: [${jobId}] Cleaned up temp file: ${localFilePath}`);
+          });
+        }
+      }
+    } catch (parseError) {
+      console.error('Relay: Failed to parse message:', parseError);
+      console.error('Relay: Raw message:', messageString);
     }
   });
 });

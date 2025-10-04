@@ -2,6 +2,8 @@
 /node_modules/
 /uploads/
 /whisper-bin/
+/transcriptions/
+/audios/
 # Logs
 logs
 *.log
