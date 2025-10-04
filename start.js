@@ -79,6 +79,67 @@ function shouldSkipInstall(forceReinstall = false) {
   return false;
 }
 
+async function getGPUStatus() {
+  try {
+    // Write GPU test script to temporary file
+    const testScript = `import sys
+import os
+
+# Try to create a model with GPU
+try:
+    from faster_whisper import WhisperModel
+    import warnings
+    warnings.filterwarnings("ignore")
+    
+    model = WhisperModel("base", device="cuda", compute_type="float16")
+    print("GPU_AVAILABLE:true")
+    
+except Exception as e:
+    error_msg = str(e)
+    if "CUDA" in error_msg or "cudnn" in error_msg.lower() or "cublas" in error_msg.lower() or "dll" in error_msg.lower():
+        print("GPU_AVAILABLE:false")
+        print("GPU_ERROR:" + error_msg)
+    else:
+        print("GPU_AVAILABLE:unknown")
+        print("GPU_ERROR:" + error_msg)`;
+    
+    // Write script to temporary file
+    const fs = await import('fs');
+    const path = await import('path');
+    const tempScriptPath = path.join(__dirname, 'temp_gpu_test.py');
+    fs.writeFileSync(tempScriptPath, testScript);
+    
+    try {
+      const result = execSync(`python "${tempScriptPath}"`, { 
+        encoding: 'utf8',
+        cwd: __dirname,
+        timeout: 30000 // 30 second timeout
+      });
+      
+      const lines = result.trim().split('\n');
+      const gpuAvailable = lines.find(line => line.startsWith('GPU_AVAILABLE:'))?.split(':')[1];
+      
+      if (gpuAvailable === 'true') {
+        return { available: true, type: 'GPU (CUDA)', color: 'green' };
+      } else if (gpuAvailable === 'false') {
+        return { available: false, type: 'CPU', color: 'yellow' };
+      } else {
+        return { available: false, type: 'CPU (GPU unclear)', color: 'yellow' };
+      }
+    } finally {
+      // Clean up temporary file
+      try {
+        fs.unlinkSync(tempScriptPath);
+      } catch (cleanupError) {
+        // Ignore cleanup errors
+      }
+    }
+    
+  } catch (error) {
+    return { available: false, type: 'CPU (GPU test failed)', color: 'yellow' };
+  }
+}
+
 // Loading animation function
 function showLoadingAnimation(message, duration = 2000) {
   const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -110,7 +171,8 @@ async function checkPrerequisites(forceReinstall = false) {
       mkdirSync(TRANSCRIPTIONS_DIR, { recursive: true });
       log('✅ Created transcriptions directory', 'green');
     }
-    return true;
+    // Return GPU status for skipped installs too
+    return { success: true, gpuStatus: await getGPUStatus() };
   }
   
   log('\n🔍 Checking prerequisites...', 'cyan');
@@ -200,7 +262,8 @@ async function checkPrerequisites(forceReinstall = false) {
   // Mark installation as complete
   markInstallationComplete();
 
-  return true;
+  // Return GPU status information
+  return { success: true, gpuStatus: await getGPUStatus() };
 }
 
 function markInstallationComplete() {
@@ -622,10 +685,7 @@ async function transcribeFile() {
     const duration = ((endTime - startTime) / 1000).toFixed(2);
     
     if (transcriptionResult.success) {
-      log('\n📝 Transcription Result:', 'green');
-      log('=' .repeat(50), 'bright');
-      log(transcriptionResult.transcript, 'reset');
-      log('=' .repeat(50), 'bright');
+      log('\n✅ Transcription Complete!', 'green');
       
       log(`\n📊 Transcription Info:`, 'cyan');
       log(`   Language: ${transcriptionResult.language} (${(transcriptionResult.language_probability * 100).toFixed(1)}% confidence)`, 'cyan');
@@ -635,7 +695,8 @@ async function transcribeFile() {
       log(`   Processing time: ${duration} seconds`, 'cyan');
       
       if (transcriptionResult.output_file) {
-        log(`📄 Output saved to: ${transcriptionResult.output_file}`, 'green');
+        log(`\n📄 Transcription saved to: ${transcriptionResult.output_file}`, 'green');
+        log(`   📖 View transcription: file://${transcriptionResult.output_file.replace(/\\/g, '/')}`, 'blue');
       }
       
     } else {
@@ -673,6 +734,15 @@ async function startRelayServer() {
     rl.close();
     process.exit(0);
   });
+
+  // Wait for the relay process to exit
+  return new Promise((resolve) => {
+    relayProcess.on('exit', (code) => {
+      log(`\n🛑 Relay server exited with code ${code}`, 'yellow');
+      rl.close();
+      process.exit(code);
+    });
+  });
 }
 
 async function main() {
@@ -687,14 +757,18 @@ async function main() {
   }
 
   // Check prerequisites
-  const prerequisitesOk = await checkPrerequisites(forceReinstall);
-  if (!prerequisitesOk) {
+  const prerequisitesResult = await checkPrerequisites(forceReinstall);
+  if (!prerequisitesResult.success) {
     log('\n❌ Prerequisites check failed. Please fix the issues above.', 'red');
     rl.close();
     process.exit(1);
   }
 
   log('\n✅ All prerequisites verified successfully!', 'green');
+  
+  // Display GPU/CPU status
+  const gpuStatus = prerequisitesResult.gpuStatus;
+  log(`🎮 Processing Device: ${gpuStatus.type}`, gpuStatus.color);
 
   // Main menu
   while (true) {

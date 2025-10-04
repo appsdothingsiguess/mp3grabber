@@ -171,14 +171,11 @@ if __name__ == "__main__":
 
 function transcribe(file) {
     try {
-        console.log(`Relay: Executing Python script for file: ${file}`);
+        console.log(`🔄 Transcribing audio file...`);
         const result = execSync(`python "${PYTHON_SCRIPT}" "${file}"`, {
             encoding: "utf8",
             cwd: __dirname
         });
-        
-        console.log(`Relay: Python script output length: ${result.length}`);
-        console.log(`Relay: Python script raw output:`, result);
         
         // Parse the output to extract JSON result
         const lines = result.trim().split('\n');
@@ -190,10 +187,8 @@ function transcribe(file) {
             if (line.startsWith('{') && line.endsWith('}')) {
                 try {
                     jsonResult = JSON.parse(line);
-                    console.log(`Relay: Found JSON result:`, jsonResult);
                     break;
                 } catch (parseError) {
-                    console.log(`Relay: Failed to parse line as JSON: ${line}`);
                     continue;
                 }
             }
@@ -204,7 +199,7 @@ function transcribe(file) {
         }
         
         if (jsonResult.success) {
-            console.log(`Relay: Transcription successful, transcript length: ${jsonResult.transcript?.length || 0}`);
+            console.log(`✅ Transcription complete!`);
             return jsonResult.transcript;
         } else {
             throw new Error(jsonResult.error || 'Transcription failed');
@@ -219,7 +214,7 @@ function transcribe(file) {
 app.get('/', (_, res) => res.sendFile(path.join(__dirname, 'viewer.html')));
 
 const server = app.listen(PORT, () => {
-  console.log(`Relay server listening on port ${PORT}`);
+  console.log(`🚀 Relay server listening on port ${PORT}`);
   if (!existsSync(UPLOADS_DIR)) mkdirSync(UPLOADS_DIR);
   if (!existsSync(TRANSCRIPTIONS_DIR)) mkdirSync(TRANSCRIPTIONS_DIR);
 });
@@ -263,11 +258,10 @@ function downloadFile(url, dest) {
 
 // --- WebSocket Server Logic ---
 wss.on('connection', ws => {
-  console.log('Relay client connected.');
-  console.log('Relay: WebSocket connection established from:', ws._socket?.remoteAddress);
+  console.log('🌐 Client connected');
   
   ws.on('close', (code, reason) => {
-    console.log('Relay client disconnected.', { code, reason: reason.toString() });
+    console.log('🔌 Client disconnected');
   });
   
   ws.on('error', error => {
@@ -276,79 +270,64 @@ wss.on('connection', ws => {
 
   ws.on('message', async msg => {
     const messageString = msg.toString();
-    console.log('Relay received message:', messageString);
-    console.log('Relay: Message length:', messageString.length);
-    console.log('Relay: Message type:', typeof messageString);
+    console.log('📨 Received URL:', messageString);
 
     try {
       const parsedMessage = JSON.parse(messageString);
-      console.log('Relay: Parsed message:', parsedMessage);
-      
       const { url } = parsedMessage;
       if (!url) {
-        console.warn('Relay: Received message without a URL.');
-        console.warn('Relay: Message structure:', parsedMessage);
+        console.warn('⚠️  Received message without a URL');
         return;
       }
-
-      console.log('Relay: Processing URL:', url);
-      console.log('Relay: URL type:', typeof url);
-      console.log('Relay: URL length:', url.length);
 
       const jobId = uuidv4();
       let localFilePath = '';
 
       try {
-        console.log(`Relay: Starting job ${jobId} for URL: ${url}`);
+        console.log(`🔄 Starting transcription job: ${jobId}`);
         const startMessage = JSON.stringify({
           type: 'new_transcription',
           payload: { url, id: jobId }
         });
-        console.log(`Relay: Sending start message: ${startMessage}`);
         wss.clients.forEach(client => {
           if (client.readyState === WebSocket.OPEN) client.send(startMessage);
         });
 
         const fileExtension = path.extname(new URL(url).pathname);
         localFilePath = path.join(UPLOADS_DIR, `${jobId}${fileExtension}`);
-        console.log(`Relay: [${jobId}] Downloading file to: ${localFilePath}`);
+        console.log('📥 Downloading audio file...');
         await downloadFile(url, localFilePath);
-        console.log(`Relay: [${jobId}] Download complete.`);
+        console.log('✅ Download complete');
 
-        console.log(`Relay: [${jobId}] Starting transcription...`);
+        console.log('🔄 Starting transcription...');
         const transcript = transcribe(localFilePath);
-        console.log(`Relay: [${jobId}] Transcription complete.`);
 
         const resultMessage = JSON.stringify({
           type: 'transcription_done',
           payload: { id: jobId, transcript }
         });
-        console.log(`Relay: [${jobId}] Sending result message: ${resultMessage}`);
         wss.clients.forEach(client => {
           if (client.readyState === WebSocket.OPEN) client.send(resultMessage);
         });
 
       } catch (e) {
-        console.error(`Relay: [${jobId}] Failed to process message:`, e);
+        console.error(`❌ Transcription failed:`, e.message);
         const errorMessage = JSON.stringify({
           type: 'transcription_failed',
           payload: { id: jobId, error: e.message }
         });
-        console.log(`Relay: [${jobId}] Sending error message: ${errorMessage}`);
         wss.clients.forEach(client => {
           if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
         });
       } finally {
         if (localFilePath) {
           unlink(localFilePath, err => {
-            if (err) console.error(`Relay: [${jobId}] Error deleting temp file:`, err);
-            else console.log(`Relay: [${jobId}] Cleaned up temp file: ${localFilePath}`);
+            if (err) console.error(`⚠️  Error deleting temp file:`, err);
           });
         }
       }
     } catch (parseError) {
-      console.error('Relay: Failed to parse message:', parseError);
-      console.error('Relay: Raw message:', messageString);
+      console.error('❌ Failed to parse message:', parseError.message);
     }
   });
 });
