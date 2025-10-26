@@ -3,7 +3,7 @@
 /uploads/
 /whisper-bin/
 /transcriptions/
-/audios/
+/media/
 # Logs
 logs
 *.log

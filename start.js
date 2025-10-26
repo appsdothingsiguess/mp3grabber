@@ -161,12 +161,12 @@ function showLoadingAnimation(message, duration = 2000) {
 }
 
 async function ensureDirectoriesAndFiles() {
-  // Create audios directory
+  // Create media directory
   if (!existsSync(MEDIA_DIR)) {
     mkdirSync(MEDIA_DIR, { recursive: true });
-    log('✅ Created audios directory', 'green');
+    log('✅ Created media directory', 'green');
   } else {
-    log('✅ Audios directory exists', 'green');
+    log('✅ Media directory exists', 'green');
   }
 
   // Create transcriptions directory
@@ -199,30 +199,26 @@ async function ensureDirectoriesAndFiles() {
   }
 
   // Create README files for directories if they don't exist
-  const audiosReadme = path.join(MEDIA_DIR, 'README.md');
-  if (!existsSync(audiosReadme)) {
-    const audiosReadmeContent = `# Audio Files Directory
+  const mediaReadme = path.join(MEDIA_DIR, 'README.md');
+  if (!existsSync(mediaReadme)) {
+    const mediaReadmeContent = `# Media Files Directory
 
-Place your audio files here for transcription.
+Place your audio/video files here for transcription.
 
 ## Supported Formats
-- .mp3
-- .wav
-- .m4a
-- .flac
-- .ogg
-- .webm
+- Audio: .mp3, .wav, .m4a, .flac, .ogg, .webm
+- Video: .mp4, .mkv, .avi (audio automatically extracted)
 
 ## Usage
 Run \`npm run setup\` and choose option 1 to transcribe files from this directory.
 
 ## Tips
-- Use shorter audio files for faster processing
-- Higher quality audio files produce better transcriptions
+- Use shorter files for faster processing
+- Higher quality files produce better transcriptions
 - GPU acceleration is available for faster processing
 `;
-    writeFileSync(audiosReadme, audiosReadmeContent);
-    log('✅ Created audios/README.md', 'green');
+    writeFileSync(mediaReadme, mediaReadmeContent);
+    log('✅ Created media/README.md', 'green');
   }
 
   const transcriptionsReadme = path.join(TRANSCRIPTIONS_DIR, 'README.md');
@@ -694,7 +690,7 @@ async function transcribeFile() {
   );
 
   if (audioFiles.length === 0) {
-    log('❌ No audio/video files found in audios/ directory', 'red');
+    log('❌ No audio/video files found in media/ directory', 'red');
     log('   Supported formats: .mp3, .wav, .m4a, .flac, .ogg, .webm, .mp4, .mkv, .avi', 'yellow');
     return;
   }
@@ -874,7 +870,7 @@ async function main() {
   while (true) {
     log('\n' + '='.repeat(50), 'bright');
     log('Choose transcription mode:', 'cyan');
-    log('1. Transcribe audio file (from audios/ folder)', 'blue');
+    log('1. Transcribe media file (from media/ folder)', 'blue');
     log('2. Transcribe via browser extension (start relay server)', 'blue');
     log('3. Exit', 'blue');
     

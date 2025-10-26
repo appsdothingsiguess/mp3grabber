@@ -38,14 +38,14 @@ npm run setup:install
 
 After running `npm run setup`, you can choose:
 
-1. **📁 File Transcription**: Process audio files from the `audios/` folder
+1. **📁 File Transcription**: Process media files from the `media/` folder
 2. **🌐 Extension Mode**: Start server for browser extension
 3. **❌ Exit**: Close the application
 
 ## How It Works
 
 ### File Transcription Mode
-1. Place audio files in the `audios/` folder
+1. Place media files in the `media/` folder
 2. Run `npm run setup` → Select option 1
 3. Choose your audio file
 4. Watch real-time progress with GPU/CPU status
@@ -79,7 +79,7 @@ After running `npm run setup`, you can choose:
 
 ### 📁 **Organized Output**
 - All transcriptions saved to `transcriptions/` folder
-- Original audio files remain in `audios/` folder
+- Original media files remain in `media/` folder
 - Clean, organized file structure
 
 ## Supported Audio & Video Formats
@@ -103,7 +103,7 @@ The system supports all these formats for both file transcription and browser ex
 
 ```
 mp3grabber/
-├── audios/              # Place your audio/video files here
+├── media/               # Place your audio/video files here
 ├── transcriptions/      # All transcription results saved here
 ├── extension/           # Browser extension files
 ├── relay.js            # Main server
@@ -128,7 +128,7 @@ mp3grabber/
 - CPU mode works perfectly, just slower
 
 **"No audio files found"**
-- Place supported audio/video files in the `audios/` folder
+- Place supported audio/video files in the `media/` folder
 - Supported formats: .mp3, .wav, .m4a, .flac, .ogg, .webm, .mp4, .mkv, .avi
 
 ### Performance Tips
