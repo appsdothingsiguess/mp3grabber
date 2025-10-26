@@ -82,10 +82,11 @@ After running `npm run setup`, you can choose:
 - Original audio files remain in `audios/` folder
 - Clean, organized file structure
 
-## Supported Audio Formats
+## Supported Audio & Video Formats
 
 The system supports all these formats for both file transcription and browser extension:
 
+**Audio Formats:**
 - **MP3** (`.mp3`) - Most common
 - **WAV** (`.wav`) - Uncompressed
 - **M4A** (`.m4a`) - Apple format ⭐ *Now supported by browser extension*
@@ -93,11 +94,16 @@ The system supports all these formats for both file transcription and browser ex
 - **OGG** (`.ogg`) - Open source
 - **WebM** (`.webm`) - Web format
 
+**Video Formats (audio track extracted automatically):**
+- **MP4** (`.mp4`) - Common video format
+- **MKV** (`.mkv`) - Matroska video
+- **AVI** (`.avi`) - Audio Video Interleave
+
 ## File Structure
 
 ```
 mp3grabber/
-├── audios/              # Place your audio files here
+├── audios/              # Place your audio/video files here
 ├── transcriptions/      # All transcription results saved here
 ├── extension/           # Browser extension files
 ├── relay.js            # Main server
@@ -122,8 +128,8 @@ mp3grabber/
 - CPU mode works perfectly, just slower
 
 **"No audio files found"**
-- Place supported audio files in the `audios/` folder
-- Supported formats: .mp3, .wav, .m4a, .flac, .ogg, .webm
+- Place supported audio/video files in the `audios/` folder
+- Supported formats: .mp3, .wav, .m4a, .flac, .ogg, .webm, .mp4, .mkv, .avi
 
 ### Performance Tips
 
@@ -139,7 +145,7 @@ If you prefer manual setup:
 ```bash
 # Install dependencies
 npm install
-pip install faster-whisper
+
 
 # Install GPU libraries (optional)
 pip install nvidia-cublas-cu12 nvidia-cudnn-cu12==9.*

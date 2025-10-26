@@ -9,12 +9,14 @@ from faster_whisper import WhisperModel
 # Suppress warnings for cleaner output
 warnings.filterwarnings("ignore", category=UserWarning)
 
-def transcribe_audio(audio_file, model_size="base", use_gpu=True):
+def transcribe_audio(audio_file, model_size="medium", use_gpu=True):
     """Transcribe audio file using faster-whisper"""
     try:
         # Determine device and compute type
         device = "cuda" if use_gpu else "cpu"
-        compute_type = "float16" if use_gpu else "int8"
+        # Use float32 for CPU to get better quality (int8 quantizes and reduces accuracy)
+        # For GPU, use float16 for speed/quality balance
+        compute_type = "float16" if use_gpu else "float32"
         
         print(f"STATUS:Initializing {device.upper()} processing...", flush=True)
         
@@ -27,16 +29,11 @@ def transcribe_audio(audio_file, model_size="base", use_gpu=True):
         segments, info = model.transcribe(audio_file, beam_size=5)
         
         print(f"STATUS:Processing segments...", flush=True)
-        # Collect segments with timestamps
+        # Collect segments
         transcript_text = ""
         segment_count = 0
         for segment in segments:
-            start_time = segment.start
-            end_time = segment.end
-            # Format timestamps as [MM:SS.mmm]
-            start_formatted = f"[{int(start_time//60):02d}:{start_time%60:06.3f}]"
-            end_formatted = f"[{int(end_time//60):02d}:{end_time%60:06.3f}]"
-            transcript_text += f"{start_formatted} {segment.text.strip()}\n"
+            transcript_text += segment.text.strip() + " "
             segment_count += 1
             if segment_count % 10 == 0:  # Progress update every 10 segments
                 print(f"STATUS:Processed {segment_count} segments...", flush=True)
@@ -63,20 +60,31 @@ def transcribe_audio(audio_file, model_size="base", use_gpu=True):
         }
 
 def check_gpu_availability():
-    """Check if GPU is available and working"""
+    """Check if GPU libraries are available"""
+    # Debug: print what we're checking
+    print("DEBUG:Checking GPU availability...", flush=True)
+    
+    # First try torch (most reliable)
     try:
         import torch
+        print(f"DEBUG:torch imported, cuda available: {torch.cuda.is_available()}", flush=True)
         if torch.cuda.is_available():
+            print("DEBUG:GPU available via torch.cuda", flush=True)
             return True
-    except ImportError:
+    except ImportError as e:
+        print(f"DEBUG:torch not available: {e}", flush=True)
         pass
     
+    # Then try CUDA libraries
     try:
-        # Try to import CUDA libraries
-        import nvidia.cublas.lib
-        import nvidia.cudnn.lib
+        import nvidia.cublas
+        import nvidia.cudnn
+        print("DEBUG:CUDA libraries imported successfully", flush=True)
+        # If we can import both, assume GPU is available
+        # The actual transcription will fallback to CPU if GPU fails
         return True
-    except ImportError:
+    except ImportError as e:
+        print(f"DEBUG:CUDA libraries not available: {e}", flush=True)
         return False
 
 def save_transcription(transcript, audio_file, device, compute_type, language, confidence):
@@ -89,9 +97,8 @@ def save_transcription(transcript, audio_file, device, compute_type, language, c
         transcriptions_dir = os.path.join(os.path.dirname(audio_file), "..", "transcriptions")
         os.makedirs(transcriptions_dir, exist_ok=True)
         
-        # Create output file path with timestamp suffix to avoid overwriting
-        timestamp_suffix = datetime.now().strftime('%Y%m%d_%H%M%S')
-        output_file = os.path.join(transcriptions_dir, f"{base_name}_{timestamp_suffix}.txt")
+        # Create output file path
+        output_file = os.path.join(transcriptions_dir, f"{base_name}.txt")
         
         # Create header with metadata
         header = f"""Transcription Results

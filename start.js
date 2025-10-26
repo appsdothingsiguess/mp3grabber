@@ -13,7 +13,7 @@ const rl = createInterface({
 });
 
 // Configuration
-const AUDIOS_DIR = path.join(__dirname, 'audios');
+const MEDIA_DIR = path.join(__dirname, 'media');
 const TRANSCRIPTIONS_DIR = path.join(__dirname, 'transcriptions');
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const PYTHON_SCRIPT = path.join(__dirname, 'transcribe.py');
@@ -141,7 +141,7 @@ except Exception as e:
   }
 }
 
-// Loading animation function
+// Loading animation function with configurable duration
 function showLoadingAnimation(message, duration = 2000) {
   const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   let i = 0;
@@ -162,8 +162,8 @@ function showLoadingAnimation(message, duration = 2000) {
 
 async function ensureDirectoriesAndFiles() {
   // Create audios directory
-  if (!existsSync(AUDIOS_DIR)) {
-    mkdirSync(AUDIOS_DIR, { recursive: true });
+  if (!existsSync(MEDIA_DIR)) {
+    mkdirSync(MEDIA_DIR, { recursive: true });
     log('✅ Created audios directory', 'green');
   } else {
     log('✅ Audios directory exists', 'green');
@@ -199,7 +199,7 @@ async function ensureDirectoriesAndFiles() {
   }
 
   // Create README files for directories if they don't exist
-  const audiosReadme = path.join(AUDIOS_DIR, 'README.md');
+  const audiosReadme = path.join(MEDIA_DIR, 'README.md');
   if (!existsSync(audiosReadme)) {
     const audiosReadmeContent = `# Audio Files Directory
 
@@ -254,6 +254,8 @@ async function checkPrerequisites(forceReinstall = false) {
   if (shouldSkipInstall(forceReinstall)) {
     // Still need to ensure directories and files exist
     await ensureDirectoriesAndFiles();
+    // IMPORTANT: Configure GPU paths every time, not just during installation
+    await configureGPULibraryPaths(true); // silent mode
     // Return GPU status for skipped installs too
     return { success: true, gpuStatus: await getGPUStatus() };
   }
@@ -295,21 +297,21 @@ async function checkPrerequisites(forceReinstall = false) {
     return false;
   }
 
-  // Install Node.js dependencies with loading animation
-  await showLoadingAnimation('Installing Node.js dependencies...', 3000);
+  // Install Node.js dependencies
+  log('📦 Installing Node.js dependencies...', 'cyan');
   try {
-    execSync('npm install', { stdio: 'pipe', cwd: __dirname });
+    execSync('npm install', { stdio: 'inherit', cwd: __dirname });
     log('✅ Node.js dependencies installed successfully', 'green');
   } catch (error) {
     log('❌ Failed to install Node.js dependencies', 'red');
     return false;
   }
 
-  // Install Python dependencies with loading animation
-  await showLoadingAnimation('Installing Python dependencies...', 4000);
+  // Install Python dependencies
+  log('📦 Installing Python dependencies (this may take a few minutes)...', 'cyan');
   try {
-    // Install faster-whisper
-    execSync('pip install faster-whisper', { stdio: 'pipe' });
+    // Install faster-whisper with visible progress
+    execSync('pip install faster-whisper', { stdio: 'inherit' });
     log('✅ faster-whisper installed successfully', 'green');
     
     // Check for NVIDIA GPU and install GPU dependencies
@@ -352,13 +354,13 @@ async function installGPUDependencies() {
     const nvidiaCheck = execSync('nvidia-smi', { encoding: 'utf8', stdio: 'pipe' });
     log('🎮 NVIDIA GPU detected!', 'green');
     
-    // Install NVIDIA libraries for GPU support with loading animation
-    await showLoadingAnimation('Installing NVIDIA GPU libraries...', 5000);
+    // Install NVIDIA libraries for GPU support
+    log('📦 Installing NVIDIA GPU libraries (this may take a few minutes)...', 'cyan');
     
     try {
       // Install cuBLAS and cuDNN for CUDA 12
-      execSync('pip install nvidia-cublas-cu12', { stdio: 'pipe' });
-      execSync('pip install nvidia-cudnn-cu12==9.*', { stdio: 'pipe' });
+      execSync('pip install nvidia-cublas-cu12', { stdio: 'inherit' });
+      execSync('pip install nvidia-cudnn-cu12==9.*', { stdio: 'inherit' });
       log('✅ NVIDIA GPU libraries installed successfully', 'green');
       
       // Configure library paths based on platform
@@ -375,16 +377,16 @@ async function installGPUDependencies() {
   }
 }
 
-async function configureGPULibraryPaths() {
+async function configureGPULibraryPaths(silent = false) {
   try {
     if (process.platform === 'linux') {
       // Linux configuration
-      const ldPath = execSync('python3 -c "import os; import nvidia.cublas.lib; import nvidia.cudnn.lib; print(os.path.dirname(nvidia.cublas.lib.__file__) + \":\" + os.path.dirname(nvidia.cudnn.lib.__file__))"', { encoding: 'utf8' }).trim();
+      const ldPath = execSync('python3 -c "import os; import nvidia.cublas; import nvidia.cudnn; print(os.path.dirname(nvidia.cublas.__file__) + \":\" + os.path.dirname(nvidia.cudnn.__file__))"', { encoding: 'utf8' }).trim();
       process.env.LD_LIBRARY_PATH = ldPath;
-      log('✅ Linux GPU library paths configured', 'green');
+      if (!silent) log('✅ Linux GPU library paths configured', 'green');
     } else if (process.platform === 'win32') {
       // Windows configuration
-      log('🔧 Configuring Windows GPU library paths...', 'yellow');
+      if (!silent) log('🔧 Configuring Windows GPU library paths...', 'yellow');
       
       try {
         // Get the Python site-packages directory
@@ -413,21 +415,27 @@ async function configureGPULibraryPaths() {
         const cudnnBinPath = path.join(pythonPath, 'nvidia', 'cudnn', 'bin');
         if (existsSync(cudnnBinPath)) {
           process.env.PATH = `${cudnnBinPath};${process.env.PATH}`;
-          log(`   cuDNN bin path: ${cudnnBinPath}`, 'cyan');
+          if (!silent) log(`   cuDNN bin path: ${cudnnBinPath}`, 'cyan');
         }
         
-        log('✅ Windows GPU library paths configured', 'green');
-        log(`   cuBLAS path: ${cublasPath}`, 'cyan');
-        log(`   cuDNN path: ${cudnnPath}`, 'cyan');
+        if (!silent) {
+          log('✅ Windows GPU library paths configured', 'green');
+          log(`   cuBLAS path: ${cublasPath}`, 'cyan');
+          log(`   cuDNN path: ${cudnnPath}`, 'cyan');
+        }
         
       } catch (pathError) {
-        log('⚠️  Could not configure Windows GPU paths automatically', 'yellow');
-        log('   GPU may still work, but manual configuration might be needed', 'yellow');
+        if (!silent) {
+          log('⚠️  Could not configure Windows GPU paths automatically', 'yellow');
+          log('   GPU may still work, but manual configuration might be needed', 'yellow');
+        }
       }
     }
   } catch (error) {
-    log('⚠️  GPU library path configuration failed', 'yellow');
-    log('   GPU acceleration may not work properly', 'yellow');
+    if (!silent) {
+      log('⚠️  GPU library path configuration failed', 'yellow');
+      log('   GPU acceleration may not work properly', 'yellow');
+    }
   }
 }
 
@@ -443,12 +451,14 @@ from faster_whisper import WhisperModel
 # Suppress warnings for cleaner output
 warnings.filterwarnings("ignore", category=UserWarning)
 
-def transcribe_audio(audio_file, model_size="base", use_gpu=True):
+def transcribe_audio(audio_file, model_size="medium", use_gpu=True):
     """Transcribe audio file using faster-whisper"""
     try:
         # Determine device and compute type
         device = "cuda" if use_gpu else "cpu"
-        compute_type = "float16" if use_gpu else "int8"
+        # Use float32 for CPU to get better quality (int8 quantizes and reduces accuracy)
+        # For GPU, use float16 for speed/quality balance
+        compute_type = "float16" if use_gpu else "float32"
         
         print(f"STATUS:Initializing {device.upper()} processing...", flush=True)
         
@@ -492,20 +502,31 @@ def transcribe_audio(audio_file, model_size="base", use_gpu=True):
         }
 
 def check_gpu_availability():
-    """Check if GPU is available and working"""
+    """Check if GPU libraries are available"""
+    # Debug: print what we're checking
+    print("DEBUG:Checking GPU availability...", flush=True)
+    
+    # First try torch (most reliable)
     try:
         import torch
+        print(f"DEBUG:torch imported, cuda available: {torch.cuda.is_available()}", flush=True)
         if torch.cuda.is_available():
+            print("DEBUG:GPU available via torch.cuda", flush=True)
             return True
-    except ImportError:
+    except ImportError as e:
+        print(f"DEBUG:torch not available: {e}", flush=True)
         pass
     
+    # Then try CUDA libraries
     try:
-        # Try to import CUDA libraries
-        import nvidia.cublas.lib
-        import nvidia.cudnn.lib
+        import nvidia.cublas
+        import nvidia.cudnn
+        print("DEBUG:CUDA libraries imported successfully", flush=True)
+        # If we can import both, assume GPU is available
+        # The actual transcription will fallback to CPU if GPU fails
         return True
-    except ImportError:
+    except ImportError as e:
+        print(f"DEBUG:CUDA libraries not available: {e}", flush=True)
         return False
 
 def save_transcription(transcript, audio_file, device, compute_type, language, confidence):
@@ -595,8 +616,8 @@ import os
 try:
     # First check if CUDA libraries can be imported
     try:
-        import nvidia.cublas.lib
-        import nvidia.cudnn.lib
+        import nvidia.cublas
+        import nvidia.cudnn
         print("CUDA_LIBS:available")
     except ImportError as lib_error:
         print("CUDA_LIBS:missing")
@@ -659,23 +680,26 @@ except Exception as e:
 async function transcribeFile() {
   log('\n📁 File Transcription Mode', 'cyan');
   
-  // List available audio files
-  const audioFiles = readdirSync(AUDIOS_DIR).filter(file => 
+  // List available audio and video files
+  const audioFiles = readdirSync(MEDIA_DIR).filter(file => 
     file.toLowerCase().endsWith('.mp3') || 
     file.toLowerCase().endsWith('.wav') || 
     file.toLowerCase().endsWith('.m4a') ||
     file.toLowerCase().endsWith('.flac') ||
     file.toLowerCase().endsWith('.ogg') ||
-    file.toLowerCase().endsWith('.webm')
+    file.toLowerCase().endsWith('.webm') ||
+    file.toLowerCase().endsWith('.mp4') ||
+    file.toLowerCase().endsWith('.mkv') ||
+    file.toLowerCase().endsWith('.avi')
   );
 
   if (audioFiles.length === 0) {
-    log('❌ No audio files found in audios/ directory', 'red');
-    log('   Supported formats: .mp3, .wav, .m4a, .flac, .ogg, .webm', 'yellow');
+    log('❌ No audio/video files found in audios/ directory', 'red');
+    log('   Supported formats: .mp3, .wav, .m4a, .flac, .ogg, .webm, .mp4, .mkv, .avi', 'yellow');
     return;
   }
 
-  log('\nAvailable audio files:', 'bright');
+  log('\nAvailable audio/video files:', 'bright');
   audioFiles.forEach((file, index) => {
     log(`   ${index + 1}. ${file}`, 'blue');
   });
@@ -700,7 +724,7 @@ async function transcribeFile() {
     }
   }
 
-  const filePath = path.join(AUDIOS_DIR, selectedFile);
+  const filePath = path.join(MEDIA_DIR, selectedFile);
   log(`\n🎵 Transcribing: ${selectedFile}`, 'magenta');
   
   try {
@@ -714,7 +738,8 @@ async function transcribeFile() {
       
       const pythonProcess = spawn('python', [PYTHON_SCRIPT, filePath], {
         cwd: __dirname,
-        stdio: ['pipe', 'pipe', 'pipe']
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: process.env  // CRITICAL: Pass environment variables including PATH and CUDA paths
       });
       
       pythonProcess.stdout.on('data', (data) => {
@@ -725,6 +750,10 @@ async function transcribeFile() {
               // Handle progress updates
               const status = line.substring(7);
               log(`   ${status}`, 'cyan');
+            } else if (line.startsWith('DEBUG:')) {
+              // Handle debug messages
+              const debug = line.substring(6);
+              log(`   [DEBUG] ${debug}`, 'yellow');
             } else if (line.startsWith('{')) {
               // This is the JSON result
               output += line;
