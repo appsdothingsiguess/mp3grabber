@@ -484,11 +484,16 @@ def transcribe_audio(audio_file, model_size="medium", use_gpu=True):
         segments, info = model.transcribe(audio_file, beam_size=5)
         
         print(f"STATUS:Processing segments...", flush=True)
-        # Collect segments
+        # Collect segments with timestamps
         transcript_text = ""
         segment_count = 0
         for segment in segments:
-            transcript_text += segment.text.strip() + " "
+            start_time = segment.start
+            end_time = segment.end
+            # Format timestamps as [MM:SS.mmm]
+            start_formatted = f"[{int(start_time//60):02d}:{start_time%60:06.3f}]"
+            end_formatted = f"[{int(end_time//60):02d}:{end_time%60:06.3f}]"
+            transcript_text += f"{start_formatted} {segment.text.strip()}\\n"
             segment_count += 1
             if segment_count % 10 == 0:  # Progress update every 10 segments
                 print(f"STATUS:Processed {segment_count} segments...", flush=True)
