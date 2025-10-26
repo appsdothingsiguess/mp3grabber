@@ -441,6 +441,7 @@ import sys
 import os
 import warnings
 import json
+import time
 from datetime import datetime
 from faster_whisper import WhisperModel
 
@@ -458,9 +459,25 @@ def transcribe_audio(audio_file, model_size="medium", use_gpu=True):
         
         print(f"STATUS:Initializing {device.upper()} processing...", flush=True)
         
-        # Load model with error handling
+        # Load model with timing
         print(f"STATUS:Loading Whisper model ({model_size})...", flush=True)
+        print(f"STATUS:Checking cache (downloading if needed)...", flush=True)
+        
+        start_time = time.time()
         model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        load_time = time.time() - start_time
+        
+        # Determine if it was cached based on load time
+        # Cached models load very quickly (< 2s for GPU, < 3s for CPU)
+        if use_gpu:
+            is_cached = load_time < 2.0
+        else:
+            is_cached = load_time < 3.0
+        
+        if is_cached:
+            print(f"STATUS:Model loaded from cache ({load_time:.1f}s)", flush=True)
+        else:
+            print(f"STATUS:Model downloaded and loaded ({load_time:.1f}s)", flush=True)
         
         print(f"STATUS:Starting transcription...", flush=True)
         # Transcribe
@@ -485,6 +502,7 @@ def transcribe_audio(audio_file, model_size="medium", use_gpu=True):
             "language_probability": info.language_probability,
             "device": device,
             "compute_type": compute_type,
+            "model_size": model_size,
             "segment_count": segment_count
         }
         
@@ -494,7 +512,8 @@ def transcribe_audio(audio_file, model_size="medium", use_gpu=True):
             "success": False,
             "error": error_msg,
             "device": device,
-            "compute_type": compute_type
+            "compute_type": compute_type,
+            "model_size": model_size
         }
 
 def check_gpu_availability():
@@ -525,7 +544,7 @@ def check_gpu_availability():
         print(f"DEBUG:CUDA libraries not available: {e}", flush=True)
         return False
 
-def save_transcription(transcript, audio_file, device, compute_type, language, confidence):
+def save_transcription(transcript, audio_file, device, compute_type, language, confidence, model_size):
     """Save transcription to transcriptions folder"""
     try:
         # Get base filename without extension
@@ -544,6 +563,7 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Source: {os.path.basename(audio_file)}
 Device: {device.upper()}
 Compute Type: {compute_type}
+Model Size: {model_size}
 Language: {language} ({confidence:.1%} confidence)
 
 --- TRANSCRIPTION ---
@@ -572,14 +592,15 @@ if __name__ == "__main__":
     gpu_available = check_gpu_availability()
     
     # Try GPU first if available, otherwise use CPU
+    # Use "medium" model for GPU, "base" model for CPU (better performance on CPU)
     if gpu_available:
-        result = transcribe_audio(audio_file, use_gpu=True)
+        result = transcribe_audio(audio_file, model_size="medium", use_gpu=True)
         if not result["success"] and ("CUDA" in result["error"] or "cudnn" in result["error"].lower() or "cublas" in result["error"].lower()):
             # Fallback to CPU if GPU fails
-            result = transcribe_audio(audio_file, use_gpu=False)
+            result = transcribe_audio(audio_file, model_size="base", use_gpu=False)
     else:
-        # Use CPU directly
-        result = transcribe_audio(audio_file, use_gpu=False)
+        # Use CPU directly with base model
+        result = transcribe_audio(audio_file, model_size="base", use_gpu=False)
     
     # Save transcription if successful
     if result["success"]:
@@ -589,7 +610,8 @@ if __name__ == "__main__":
             result["device"], 
             result["compute_type"],
             result["language"],
-            result["language_probability"]
+            result["language_probability"],
+            result["model_size"]
         )
         if output_file:
             result["output_file"] = output_file
@@ -786,6 +808,7 @@ async function transcribeFile() {
       log(`\n📊 Transcription Info:`, 'cyan');
       log(`   Language: ${transcriptionResult.language} (${(transcriptionResult.language_probability * 100).toFixed(1)}% confidence)`, 'cyan');
       log(`   Device: ${transcriptionResult.device.toUpperCase()}`, transcriptionResult.device === 'cuda' ? 'green' : 'yellow');
+      log(`   Model: ${transcriptionResult.model_size}`, 'cyan');
       log(`   Compute Type: ${transcriptionResult.compute_type}`, 'cyan');
       log(`   Segments Processed: ${transcriptionResult.segment_count || 'N/A'}`, 'cyan');
       log(`   Processing time: ${duration} seconds`, 'cyan');
