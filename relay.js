@@ -3,9 +3,9 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createWriteStream, unlink, existsSync, mkdirSync, writeFileSync } from 'fs';
+import { createWriteStream, unlink, existsSync, mkdirSync, writeFileSync, readdirSync } from 'fs';
 import { get } from 'https';
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 
 // --- Setup ---
@@ -15,6 +15,7 @@ const wss = new WebSocketServer({ noServer: true });
 const PORT = 8787;
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const TRANSCRIPTIONS_DIR = path.join(__dirname, 'transcriptions');
+const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
 const PYTHON_SCRIPT = path.join(__dirname, 'transcribe.py');
 
 // Create Python transcription script if it doesn't exist
@@ -217,6 +218,29 @@ if __name__ == "__main__":
   writeFileSync(PYTHON_SCRIPT, pythonScript);
 }
 
+// --- Cookie Helper Functions for yt-dlp ---
+function formatCookie(cookie) {
+  // Netscape format: domain flag path secure expiration name value
+  const domain = cookie.domain;
+  const flag = domain.startsWith('.') ? 'TRUE' : 'FALSE';
+  const cookiePath = cookie.path || '/';
+  const secure = cookie.secure ? 'TRUE' : 'FALSE';
+  // Use expirationDate if available, otherwise default to 1 year from now
+  const expiration = cookie.expirationDate || Math.floor(Date.now() / 1000) + 31536000;
+  const name = cookie.name;
+  const value = cookie.value;
+  
+  return [domain, flag, cookiePath, secure, expiration, name, value].join('\t');
+}
+
+function writeNetscapeCookieFile(cookies, filepath) {
+  const header = '# Netscape HTTP Cookie File\n';
+  const content = header + cookies.map(formatCookie).join('\n');
+  writeFileSync(filepath, content);
+  console.log(`✅ Cookie file written: ${filepath} (${cookies.length} cookies)`);
+}
+
+// --- Transcription Function ---
 function transcribe(file) {
     try {
         console.log(`🔄 Transcribing audio file...`);
@@ -265,6 +289,7 @@ const server = app.listen(PORT, () => {
   console.log(`🚀 Relay server listening on port ${PORT}`);
   if (!existsSync(UPLOADS_DIR)) mkdirSync(UPLOADS_DIR);
   if (!existsSync(TRANSCRIPTIONS_DIR)) mkdirSync(TRANSCRIPTIONS_DIR);
+  if (!existsSync(DOWNLOADS_DIR)) mkdirSync(DOWNLOADS_DIR);
 });
 
 // Handle graceful shutdown
@@ -322,10 +347,17 @@ wss.on('connection', ws => {
 
     try {
       const parsedMessage = JSON.parse(messageString);
-      const { type, url, data, mimeType, size, originalUrl, element, source, pageUrl } = parsedMessage;
+      const { type, url, data, mimeType, size, originalUrl, element, source, pageUrl, cookies } = parsedMessage;
       
       if (!type) {
         console.warn('⚠️  Received message without a type');
+        return;
+      }
+
+      // Handle ping messages (connection verification)
+      if (type === 'ping') {
+        console.log('🏓 Ping received from extension');
+        ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
         return;
       }
 
@@ -347,8 +379,172 @@ wss.on('connection', ws => {
           if (client.readyState === WebSocket.OPEN) client.send(startMessage);
         });
 
+        // Handle stream_found (yt-dlp with cookies)
+        if (type === 'stream_found') {
+          console.log(`📥 Processing stream with yt-dlp (${url})...`);
+          
+          if (!cookies || cookies.length === 0) {
+            console.warn('⚠️  No cookies provided for stream, attempting download anyway');
+          }
+          
+          // Create temporary cookie file
+          const cookieFilePath = path.join(DOWNLOADS_DIR, `${jobId}_cookies.txt`);
+          if (cookies && cookies.length > 0) {
+            writeNetscapeCookieFile(cookies, cookieFilePath);
+          }
+          
+          // Define output path with jobId prefix
+          const outputTemplate = path.join(UPLOADS_DIR, `${jobId}.%(ext)s`);
+          
+          // Build yt-dlp arguments
+          const ytdlpArgs = [];
+          if (cookies && cookies.length > 0) {
+            ytdlpArgs.push('--cookies', cookieFilePath);
+          }
+          ytdlpArgs.push('-o', outputTemplate);
+          ytdlpArgs.push(url);
+          
+          console.log(`🔧 Running: yt-dlp ${ytdlpArgs.join(' ')}`);
+          
+          // Spawn yt-dlp process
+          const ytdlpProcess = spawn('yt-dlp', ytdlpArgs, {
+            cwd: __dirname
+          });
+          
+          let stdoutData = '';
+          let stderrData = '';
+          
+          ytdlpProcess.stdout.on('data', (data) => {
+            const output = data.toString();
+            stdoutData += output;
+            // Log progress lines (yt-dlp outputs download progress)
+            const lines = output.split('\n');
+            lines.forEach(line => {
+              if (line.trim()) {
+                console.log(`   [yt-dlp] ${line.trim()}`);
+              }
+            });
+          });
+          
+          ytdlpProcess.stderr.on('data', (data) => {
+            const output = data.toString();
+            stderrData += output;
+            console.error(`   [yt-dlp stderr] ${output.trim()}`);
+          });
+          
+          ytdlpProcess.on('close', (code) => {
+            // Clean up cookie file
+            if (cookies && cookies.length > 0 && existsSync(cookieFilePath)) {
+              unlink(cookieFilePath, (err) => {
+                if (err) console.error(`⚠️  Error deleting cookie file:`, err);
+                else console.log(`✅ Cookie file deleted: ${cookieFilePath}`);
+              });
+            }
+            
+            if (code === 0) {
+              console.log('✅ yt-dlp download complete');
+              
+              // Scan UPLOADS_DIR for files starting with jobId
+              try {
+                const files = readdirSync(UPLOADS_DIR);
+                const downloadedFile = files.find(file => file.startsWith(jobId));
+                
+                if (!downloadedFile) {
+                  throw new Error(`Downloaded file not found with jobId prefix: ${jobId}`);
+                }
+                
+                localFilePath = path.join(UPLOADS_DIR, downloadedFile);
+                console.log(`📄 Found downloaded file: ${downloadedFile}`);
+                
+                // Proceed with transcription
+                console.log('🔄 Starting transcription...');
+                const transcript = transcribe(localFilePath);
+
+                const resultMessage = JSON.stringify({
+                  type: 'transcription_done',
+                  payload: { 
+                    id: jobId, 
+                    transcript,
+                    source: source || 'sniffer',
+                    element: element || 'stream',
+                    pageUrl: pageUrl || 'unknown'
+                  }
+                });
+                wss.clients.forEach(client => {
+                  if (client.readyState === WebSocket.OPEN) client.send(resultMessage);
+                });
+                
+              } catch (scanError) {
+                console.error(`❌ Error finding downloaded file:`, scanError.message);
+                const errorMessage = JSON.stringify({
+                  type: 'transcription_failed',
+                  payload: { 
+                    id: jobId, 
+                    error: `Download succeeded but file not found: ${scanError.message}`,
+                    source: source || 'sniffer',
+                    element: element || 'stream',
+                    pageUrl: pageUrl || 'unknown'
+                  }
+                });
+                wss.clients.forEach(client => {
+                  if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
+                });
+              }
+              
+            } else {
+              console.error(`❌ yt-dlp failed with exit code ${code}`);
+              console.error(`   stderr: ${stderrData}`);
+              const errorMessage = JSON.stringify({
+                type: 'transcription_failed',
+                payload: { 
+                  id: jobId, 
+                  error: `yt-dlp failed: ${stderrData || 'Unknown error'}`,
+                  source: source || 'sniffer',
+                  element: element || 'stream',
+                  pageUrl: pageUrl || 'unknown'
+                }
+              });
+              wss.clients.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
+              });
+            }
+            
+            // Clean up downloaded file
+            if (localFilePath && existsSync(localFilePath)) {
+              unlink(localFilePath, err => {
+                if (err) console.error(`⚠️  Error deleting temp file:`, err);
+              });
+            }
+          });
+          
+          ytdlpProcess.on('error', (error) => {
+            console.error(`❌ Failed to spawn yt-dlp:`, error.message);
+            
+            // Clean up cookie file on error
+            if (cookies && cookies.length > 0 && existsSync(cookieFilePath)) {
+              unlink(cookieFilePath, () => {});
+            }
+            
+            const errorMessage = JSON.stringify({
+              type: 'transcription_failed',
+              payload: { 
+                id: jobId, 
+                error: `Failed to spawn yt-dlp: ${error.message}. Make sure yt-dlp is installed.`,
+                source: source || 'sniffer',
+                element: element || 'stream',
+                pageUrl: pageUrl || 'unknown'
+              }
+            });
+            wss.clients.forEach(client => {
+              if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
+            });
+          });
+          
+          return; // Exit early for stream_found, handled asynchronously
+        }
+
+        // Handle blob data
         if (type === 'blob') {
-          // Handle blob data
           console.log(`📥 Processing blob data (${size} bytes, ${mimeType})...`);
           
           // Determine file extension from MIME type

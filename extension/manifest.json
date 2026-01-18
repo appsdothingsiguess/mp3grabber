@@ -1,26 +1,13 @@
 {
     "manifest_version": 3,
     "name": "MP3 Sniper",
-    "version": "0.3",
-    "permissions": ["scripting", "activeTab", "storage"],
-    "host_permissions": [
-      "https://www.youtube.com/*",
-      "https://youtube.com/*",
-      "https://*.youtube.com/*"
-    ],
-    "content_scripts": [
-      {
-        "matches": ["https://www.youtube.com/*", "https://youtube.com/*"],
-        "js": ["content.js"],
-        "run_at": "document_end",
-        "all_frames": false,
-        "match_about_blank": false
-      }
-    ],
+    "version": "0.4",
+    "permissions": ["webRequest", "cookies", "storage"],
+    "host_permissions": ["<all_urls>"],
     "commands": {
       "grab-mp3": {
         "suggested_key": { "default": "Ctrl+Shift+M" },
-        "description": "Send all audio links (.mp3, .m4a, .wav, .flac, .ogg, .webm) to LAN relay"
+        "description": "Trigger stream detection and capture"
       }
     },
     "background": { "service_worker": "bg.js" }

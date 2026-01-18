@@ -287,6 +287,25 @@ async function checkPrerequisites(forceReinstall = false) {
     return false;
   }
 
+  // Check yt-dlp
+  try {
+    const ytdlpVersion = execSync('yt-dlp --version', { encoding: 'utf8' }).trim();
+    log(`✅ yt-dlp: ${ytdlpVersion}`, 'green');
+  } catch (error) {
+    log('❌ yt-dlp not found. Attempting to install...', 'yellow');
+    try {
+      log('📦 Installing yt-dlp via pip...', 'cyan');
+      execSync('pip install yt-dlp', { stdio: 'inherit' });
+      const ytdlpVersion = execSync('yt-dlp --version', { encoding: 'utf8' }).trim();
+      log(`✅ yt-dlp installed successfully: ${ytdlpVersion}`, 'green');
+    } catch (installError) {
+      log('❌ Failed to install yt-dlp. Please install it manually:', 'red');
+      log('   pip install yt-dlp', 'yellow');
+      log('   yt-dlp is required for stream downloading functionality', 'yellow');
+      return false;
+    }
+  }
+
   // Check if package.json exists
   if (!existsSync(path.join(__dirname, 'package.json'))) {
     log('❌ package.json not found in current directory.', 'red');
