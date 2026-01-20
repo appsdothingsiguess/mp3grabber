@@ -8,6 +8,139 @@ import { get } from 'https';
 import { execSync, spawn } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
 
+// ============================================================================
+// JOB QUEUE AND DEDUPLICATION SYSTEM
+// ============================================================================
+
+class JobQueue {
+  constructor() {
+    this.queue = [];
+    this.processing = false;
+    this.currentJob = null;
+    this.completedIds = new Set(); // Track completed entry IDs to prevent re-downloading
+  }
+
+  /**
+   * Extract unique identifier from URL
+   * For Kaltura URLs: /entryId/[ID]/
+   * For other URLs: use full URL as identifier
+   */
+  extractEntryId(url) {
+    if (!url) return null;
+    
+    // Match Kaltura entryId pattern: /entryId/[ID]/
+    const kalturaMatch = url.match(/\/entryId\/([^\/]+)\//);
+    if (kalturaMatch) {
+      return kalturaMatch[1];
+    }
+    
+    // For non-Kaltura URLs, use the full URL as the identifier
+    return url;
+  }
+
+  /**
+   * Check if a job with this entryId is already queued or processing
+   */
+  isDuplicate(entryId) {
+    if (!entryId) return false;
+    
+    // Check if currently processing
+    if (this.currentJob && this.currentJob.entryId === entryId) {
+      return true;
+    }
+    
+    // Check if in queue
+    const inQueue = this.queue.some(job => job.entryId === entryId);
+    if (inQueue) {
+      return true;
+    }
+    
+    // Check if already completed in this session
+    if (this.completedIds.has(entryId)) {
+      return true;
+    }
+    
+    return false;
+  }
+
+  /**
+   * Add a job to the queue
+   * Returns true if added, false if duplicate
+   */
+  enqueue(job) {
+    const entryId = this.extractEntryId(job.url);
+    job.entryId = entryId;
+    
+    if (this.isDuplicate(entryId)) {
+      console.log(`⏭️  [SKIP] Duplicate stream detected: ${entryId || 'unknown'}`);
+      return false;
+    }
+    
+    this.queue.push(job);
+    console.log(`📥 [QUEUE] Added job ${job.jobId} (entryId: ${entryId || 'N/A'}) - Queue size: ${this.queue.length}`);
+    
+    // Start processing if not already processing
+    if (!this.processing) {
+      this.processNext();
+    }
+    
+    return true;
+  }
+
+  /**
+   * Process the next job in the queue
+   */
+  async processNext() {
+    if (this.processing || this.queue.length === 0) {
+      return;
+    }
+    
+    this.processing = true;
+    this.currentJob = this.queue.shift();
+    
+    console.log(`🚀 [QUEUE] Processing job ${this.currentJob.jobId} - Remaining: ${this.queue.length}`);
+    
+    try {
+      await this.currentJob.handler();
+      
+      // Mark as completed
+      if (this.currentJob.entryId) {
+        this.completedIds.add(this.currentJob.entryId);
+      }
+      
+      console.log(`✅ [QUEUE] Job ${this.currentJob.jobId} completed`);
+    } catch (error) {
+      console.error(`❌ [QUEUE] Job ${this.currentJob.jobId} failed:`, error.message);
+    } finally {
+      this.currentJob = null;
+      this.processing = false;
+      
+      // Process next job if available
+      if (this.queue.length > 0) {
+        console.log(`📋 [QUEUE] ${this.queue.length} job(s) remaining`);
+        setImmediate(() => this.processNext());
+      } else {
+        console.log(`✨ [QUEUE] All jobs completed`);
+      }
+    }
+  }
+
+  /**
+   * Get queue status
+   */
+  getStatus() {
+    return {
+      queueSize: this.queue.length,
+      processing: this.processing,
+      currentJob: this.currentJob ? this.currentJob.jobId : null,
+      completedCount: this.completedIds.size
+    };
+  }
+}
+
+// Global job queue instance
+const jobQueue = new JobQueue();
+
 // --- Setup ---
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -416,6 +549,12 @@ function transcribe(file, forceCPU = false) {
 // --- Express Server ---
 app.get('/', (_, res) => res.sendFile(path.join(__dirname, 'viewer.html')));
 
+// Queue status endpoint
+app.get('/queue/status', (_, res) => {
+  const status = jobQueue.getStatus();
+  res.json(status);
+});
+
 // Configure GPU library paths on startup (Windows)
 if (process.platform === 'win32') {
   try {
@@ -583,22 +722,20 @@ wss.on('connection', ws => {
       }
 
       const jobId = uuidv4();
-      let localFilePath = '';
-
-      try {
-        console.log(`🔄 Starting transcription job: ${jobId}`);
-        const startMessage = JSON.stringify({
-          type: 'new_transcription',
-          payload: { 
-            id: jobId, 
-            source: source || 'unknown',
-            element: element || 'unknown',
-            pageUrl: pageUrl || 'unknown'
-          }
-        });
-        wss.clients.forEach(client => {
-          if (client.readyState === WebSocket.OPEN) client.send(startMessage);
-        });
+      
+      console.log(`🔄 [QUEUE] New transcription request: ${jobId}`);
+      const startMessage = JSON.stringify({
+        type: 'new_transcription',
+        payload: { 
+          id: jobId, 
+          source: source || 'unknown',
+          element: element || 'unknown',
+          pageUrl: pageUrl || 'unknown'
+        }
+      });
+      wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) client.send(startMessage);
+      });
 
         // Handle stream_found (yt-dlp with cookies)
         if (type === 'stream_found') {
@@ -612,7 +749,7 @@ wss.on('connection', ws => {
                                url.includes('caption_captionasset');
           
           if (isSubtitleUrl) {
-            console.log(`⏭️  Skipping subtitle/caption URL: ${url.substring(0, 100)}...`);
+            console.log(`⏭️  [SKIP] Subtitle/caption URL: ${url.substring(0, 100)}...`);
             const skipMessage = JSON.stringify({
               type: 'transcription_skipped',
               payload: { 
@@ -627,140 +764,229 @@ wss.on('connection', ws => {
             return; // Skip processing this URL
           }
           
-          console.log(`📥 Processing stream with yt-dlp (${url})...`);
-          
-          if (!cookies || cookies.length === 0) {
-            console.warn('⚠️  No cookies provided for stream, attempting download anyway');
-          }
-          
-          // Create temporary cookie file
-          const cookieFilePath = path.join(DOWNLOADS_DIR, `${jobId}_cookies.txt`);
-          if (cookies && cookies.length > 0) {
-            writeNetscapeCookieFile(cookies, cookieFilePath);
-          }
-          
-          // Define output path with jobId prefix
-          const outputTemplate = path.join(UPLOADS_DIR, `${jobId}.%(ext)s`);
-          
-          // Build yt-dlp arguments
-          const ytdlpArgs = [];
-          if (cookies && cookies.length > 0) {
-            ytdlpArgs.push('--cookies', cookieFilePath);
-          }
-          // Format selection: best single file (prefer audio+video, fallback to best video)
-          ytdlpArgs.push('-f', 'best');
-          // Use ffmpeg if available to fix stream issues
-          ytdlpArgs.push('--postprocessor-args', 'ffmpeg:-fflags +genpts');
-          ytdlpArgs.push('-o', outputTemplate);
-          ytdlpArgs.push(url);
-          
-          console.log(`📥 Downloading stream with yt-dlp (output hidden, showing important messages only)...`);
-          
-          // Spawn yt-dlp process
-          const ytdlpProcess = spawn('yt-dlp', ytdlpArgs, {
-            cwd: __dirname
-          });
-          
-          let stdoutData = '';
-          let stderrData = '';
-          
-          ytdlpProcess.stdout.on('data', (data) => {
-            const output = data.toString();
-            stdoutData += output;
-            
-            // Only log important messages, filter out progress spam
-            const lines = output.split('\n');
-            lines.forEach(line => {
-              const trimmed = line.trim();
-              if (!trimmed) return;
-              
-              // Filter out progress lines (percentage, ETA, download speed)
-              if (trimmed.match(/\d+%|ETA|iB\/s|KiB\/s|MiB\/s/)) return;
-              
-              // Only log important messages
-              if (trimmed.match(/\[download\] Destination:|Merging formats|Deleting original file|already been downloaded|Fixing/i)) {
-                console.log(`   [yt-dlp] ${trimmed}`);
-              }
-            });
-          });
-          
-          ytdlpProcess.stderr.on('data', (data) => {
-            const output = data.toString();
-            stderrData += output;
-            
-            // Only log warnings and errors, not info messages
-            const lines = output.split('\n');
-            lines.forEach(line => {
-              const trimmed = line.trim();
-              if (!trimmed) return;
-              
-              // Log warnings and errors
-              if (trimmed.match(/WARNING|ERROR|error/i)) {
-                console.error(`   [yt-dlp] ${trimmed}`);
-              }
-            });
-          });
-          
-          ytdlpProcess.on('close', (code) => {
-            // Clean up cookie file
-            if (cookies && cookies.length > 0 && existsSync(cookieFilePath)) {
-              unlink(cookieFilePath, (err) => {
-                if (err) console.error(`⚠️  Error deleting cookie file:`, err);
-                // Success is silent - no need to log
-              });
-            }
-            
-            if (code === 0) {
-              console.log('✅ yt-dlp download complete');
-              
-              // Scan UPLOADS_DIR for files starting with jobId
-              try {
-                const files = readdirSync(UPLOADS_DIR);
-                const downloadedFile = files.find(file => file.startsWith(jobId));
+          // Add job to queue with handler
+          const added = jobQueue.enqueue({
+            jobId: jobId,
+            url: url,
+            handler: async () => {
+              return new Promise((resolve, reject) => {
+                console.log(`🎬 [DOWNLOAD] Starting download for job ${jobId}`);
+                console.log(`🔗 [DOWNLOAD] URL: ${url.substring(0, 100)}...`);
                 
-                if (!downloadedFile) {
-                  throw new Error(`Downloaded file not found with jobId prefix: ${jobId}`);
+                if (!cookies || cookies.length === 0) {
+                  console.warn('⚠️  No cookies provided for stream, attempting download anyway');
                 }
                 
-                localFilePath = path.join(UPLOADS_DIR, downloadedFile);
-                console.log(`📄 Found downloaded file: ${downloadedFile}`);
+                // Create temporary cookie file
+                const cookieFilePath = path.join(DOWNLOADS_DIR, `${jobId}_cookies.txt`);
+                if (cookies && cookies.length > 0) {
+                  writeNetscapeCookieFile(cookies, cookieFilePath);
+                }
                 
-                // Proceed with transcription
-                try {
-                  console.log('🔄 Starting transcription...');
-                  const transcript = transcribe(localFilePath);
-
-                  const resultMessage = JSON.stringify({
-                    type: 'transcription_done',
-                    payload: { 
-                      id: jobId, 
-                      transcript,
-                      source: source || 'sniffer',
-                      element: element || 'stream',
-                      pageUrl: pageUrl || 'unknown'
+                // Force output filename to be jobId.mp4 to avoid naming conflicts
+                const outputFilename = `${jobId}.mp4`;
+                const outputPath = path.join(UPLOADS_DIR, outputFilename);
+                
+                // Build yt-dlp arguments with improved HLS handling
+                const ytdlpArgs = [];
+                
+                // Add cookies if available
+                if (cookies && cookies.length > 0) {
+                  ytdlpArgs.push('--cookies', cookieFilePath);
+                }
+                
+                // Format selection: best single file (prefer audio+video, fallback to best video)
+                ytdlpArgs.push('-f', 'best');
+                
+                // Fix HLS stream warnings with ffmpeg downloader
+                ytdlpArgs.push('--downloader', 'ffmpeg');
+                ytdlpArgs.push('--hls-use-mpegts');
+                
+                // Use ffmpeg to fix stream issues
+                ytdlpArgs.push('--postprocessor-args', 'ffmpeg:-fflags +genpts');
+                
+                // Force output filename
+                ytdlpArgs.push('-o', outputPath);
+                
+                // Add URL
+                ytdlpArgs.push(url);
+                
+                console.log(`📥 [DOWNLOAD] Starting yt-dlp download...`);
+                
+                // Spawn yt-dlp process
+                const ytdlpProcess = spawn('yt-dlp', ytdlpArgs, {
+                  cwd: __dirname
+                });
+                
+                let stdoutData = '';
+                let stderrData = '';
+                
+                ytdlpProcess.stdout.on('data', (data) => {
+                  const output = data.toString();
+                  stdoutData += output;
+                  
+                  // Only log important messages, filter out progress spam
+                  const lines = output.split('\n');
+                  lines.forEach(line => {
+                    const trimmed = line.trim();
+                    if (!trimmed) return;
+                    
+                    // Filter out progress lines (percentage, ETA, download speed)
+                    if (trimmed.match(/\d+%|ETA|iB\/s|KiB\/s|MiB\/s/)) return;
+                    
+                    // Only log important messages
+                    if (trimmed.match(/\[download\] Destination:|Merging formats|Deleting original file|already been downloaded|Fixing/i)) {
+                      console.log(`   📦 [DOWNLOAD] ${trimmed}`);
                     }
                   });
-                  wss.clients.forEach(client => {
-                    if (client.readyState === WebSocket.OPEN) client.send(resultMessage);
+                });
+                
+                ytdlpProcess.stderr.on('data', (data) => {
+                  const output = data.toString();
+                  stderrData += output;
+                  
+                  // Only log warnings and errors, not info messages
+                  const lines = output.split('\n');
+                  lines.forEach(line => {
+                    const trimmed = line.trim();
+                    if (!trimmed) return;
+                    
+                    // Log warnings and errors
+                    if (trimmed.match(/WARNING|ERROR|error/i)) {
+                      console.error(`   ⚠️  [DOWNLOAD] ${trimmed}`);
+                    }
                   });
-                } catch (transcribeError) {
-                  console.error(`❌ Transcription failed:`, transcribeError.message);
+                });
+                
+                ytdlpProcess.on('close', (code) => {
+                  // Clean up cookie file
+                  if (cookies && cookies.length > 0 && existsSync(cookieFilePath)) {
+                    unlink(cookieFilePath, (err) => {
+                      if (err) console.error(`⚠️  Error deleting cookie file:`, err);
+                    });
+                  }
                   
-                  // Check if it's a CUDA error that should fall back to CPU
-                  const isCudaError = transcribeError.message.includes('CUDA') || 
-                                     transcribeError.message.includes('cudnn') ||
-                                     transcribeError.message.includes('cublas');
+                  if (code === 0) {
+                    console.log(`✅ [DOWNLOAD] Download complete for job ${jobId}`);
+                    
+                    // Verify file exists
+                    if (!existsSync(outputPath)) {
+                      const error = new Error(`Downloaded file not found: ${outputFilename}`);
+                      console.error(`❌ [DOWNLOAD] ${error.message}`);
+                      
+                      const errorMessage = JSON.stringify({
+                        type: 'transcription_failed',
+                        payload: { 
+                          id: jobId, 
+                          error: `Download succeeded but file not found: ${error.message}`,
+                          source: source || 'sniffer',
+                          element: element || 'stream',
+                          pageUrl: pageUrl || 'unknown'
+                        }
+                      });
+                      wss.clients.forEach(client => {
+                        if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
+                      });
+                      
+                      reject(error);
+                      return;
+                    }
+                    
+                    console.log(`📄 [DOWNLOAD] File saved: ${outputFilename}`);
+                    
+                    // Proceed with transcription
+                    try {
+                      console.log(`🎙️  [TRANSCRIBE] Starting transcription for job ${jobId}...`);
+                      const transcript = transcribe(outputPath);
+                      console.log(`✅ [TRANSCRIBE] Transcription complete for job ${jobId}`);
+
+                      const resultMessage = JSON.stringify({
+                        type: 'transcription_done',
+                        payload: { 
+                          id: jobId, 
+                          transcript,
+                          source: source || 'sniffer',
+                          element: element || 'stream',
+                          pageUrl: pageUrl || 'unknown'
+                        }
+                      });
+                      wss.clients.forEach(client => {
+                        if (client.readyState === WebSocket.OPEN) client.send(resultMessage);
+                      });
+                      
+                      resolve();
+                    } catch (transcribeError) {
+                      console.error(`❌ [TRANSCRIBE] Transcription failed for job ${jobId}:`, transcribeError.message);
+                      
+                      // Check if it's a CUDA error that should fall back to CPU
+                      const isCudaError = transcribeError.message.includes('CUDA') || 
+                                         transcribeError.message.includes('cudnn') ||
+                                         transcribeError.message.includes('cublas');
+                      
+                      if (isCudaError) {
+                        console.log(`💡 CUDA error detected, transcription will use CPU on next attempt`);
+                        console.log(`💡 To fix: Run 'npm run setup:install' to configure GPU libraries`);
+                      }
+                      
+                      const errorMessage = JSON.stringify({
+                        type: 'transcription_failed',
+                        payload: { 
+                          id: jobId, 
+                          error: `Transcription failed: ${transcribeError.message}`,
+                          source: source || 'sniffer',
+                          element: element || 'stream',
+                          pageUrl: pageUrl || 'unknown'
+                        }
+                      });
+                      wss.clients.forEach(client => {
+                        if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
+                      });
+                      
+                      reject(transcribeError);
+                    } finally {
+                      // Clean up downloaded file
+                      if (existsSync(outputPath)) {
+                        unlink(outputPath, err => {
+                          if (err) console.error(`⚠️  Error deleting temp file:`, err);
+                        });
+                      }
+                    }
+                    
+                  } else {
+                    const error = new Error(`yt-dlp failed with exit code ${code}: ${stderrData || 'Unknown error'}`);
+                    console.error(`❌ [DOWNLOAD] ${error.message}`);
+                    
+                    const errorMessage = JSON.stringify({
+                      type: 'transcription_failed',
+                      payload: { 
+                        id: jobId, 
+                        error: error.message,
+                        source: source || 'sniffer',
+                        element: element || 'stream',
+                        pageUrl: pageUrl || 'unknown'
+                      }
+                    });
+                    wss.clients.forEach(client => {
+                      if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
+                    });
+                    
+                    reject(error);
+                  }
+                });
+                
+                ytdlpProcess.on('error', (error) => {
+                  console.error(`❌ [DOWNLOAD] Failed to spawn yt-dlp:`, error.message);
                   
-                  if (isCudaError) {
-                    console.log(`💡 CUDA error detected, transcription will use CPU on next attempt`);
-                    console.log(`💡 To fix: Run 'npm run setup:install' to configure GPU libraries`);
+                  // Clean up cookie file on error
+                  if (cookies && cookies.length > 0 && existsSync(cookieFilePath)) {
+                    unlink(cookieFilePath, () => {});
                   }
                   
                   const errorMessage = JSON.stringify({
                     type: 'transcription_failed',
                     payload: { 
                       id: jobId, 
-                      error: `Transcription failed: ${transcribeError.message}`,
+                      error: `Failed to spawn yt-dlp: ${error.message}. Make sure yt-dlp is installed.`,
                       source: source || 'sniffer',
                       element: element || 'stream',
                       pageUrl: pageUrl || 'unknown'
@@ -769,99 +995,140 @@ wss.on('connection', ws => {
                   wss.clients.forEach(client => {
                     if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
                   });
-                }
-                
-              } catch (scanError) {
-                console.error(`❌ Error finding downloaded file:`, scanError.message);
-                const errorMessage = JSON.stringify({
-                  type: 'transcription_failed',
-                  payload: { 
-                    id: jobId, 
-                    error: `Download succeeded but file not found: ${scanError.message}`,
-                    source: source || 'sniffer',
-                    element: element || 'stream',
-                    pageUrl: pageUrl || 'unknown'
-                  }
+                  
+                  reject(error);
                 });
-                wss.clients.forEach(client => {
-                  if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
-                });
-              }
-              
-            } else {
-              console.error(`❌ yt-dlp failed with exit code ${code}`);
-              console.error(`   stderr: ${stderrData}`);
-              const errorMessage = JSON.stringify({
-                type: 'transcription_failed',
-                payload: { 
-                  id: jobId, 
-                  error: `yt-dlp failed: ${stderrData || 'Unknown error'}`,
-                  source: source || 'sniffer',
-                  element: element || 'stream',
-                  pageUrl: pageUrl || 'unknown'
-                }
-              });
-              wss.clients.forEach(client => {
-                if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
-              });
-            }
-            
-            // Clean up downloaded file
-            if (localFilePath && existsSync(localFilePath)) {
-              unlink(localFilePath, err => {
-                if (err) console.error(`⚠️  Error deleting temp file:`, err);
               });
             }
           });
           
-          ytdlpProcess.on('error', (error) => {
-            console.error(`❌ Failed to spawn yt-dlp:`, error.message);
-            
-            // Clean up cookie file on error
-            if (cookies && cookies.length > 0 && existsSync(cookieFilePath)) {
-              unlink(cookieFilePath, () => {});
-            }
-            
-            const errorMessage = JSON.stringify({
-              type: 'transcription_failed',
+          if (!added) {
+            // Job was a duplicate, notify client
+            const skipMessage = JSON.stringify({
+              type: 'transcription_skipped',
               payload: { 
                 id: jobId, 
-                error: `Failed to spawn yt-dlp: ${error.message}. Make sure yt-dlp is installed.`,
+                reason: 'Duplicate stream detected (already in queue or processing)',
+                url: url
+              }
+            });
+            wss.clients.forEach(client => {
+              if (client.readyState === WebSocket.OPEN) client.send(skipMessage);
+            });
+          } else {
+            // Notify client that job was queued
+            const queuedMessage = JSON.stringify({
+              type: 'transcription_queued',
+              payload: { 
+                id: jobId, 
+                queuePosition: jobQueue.getStatus().queueSize,
                 source: source || 'sniffer',
                 element: element || 'stream',
                 pageUrl: pageUrl || 'unknown'
               }
             });
             wss.clients.forEach(client => {
-              if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
+              if (client.readyState === WebSocket.OPEN) client.send(queuedMessage);
             });
-          });
+          }
           
-          return; // Exit early for stream_found, handled asynchronously
+          return; // Exit early for stream_found, handled by queue
         }
 
         // Handle blob data
         if (type === 'blob') {
-          console.log(`📥 Processing blob data (${size} bytes, ${mimeType})...`);
+          console.log(`📥 [QUEUE] Processing blob data (${size} bytes, ${mimeType})...`);
           
-          // Determine file extension from MIME type
-          let fileExtension = '.mp3'; // default
-          if (mimeType) {
-            if (mimeType.includes('mp4')) fileExtension = '.mp4';
-            else if (mimeType.includes('webm')) fileExtension = '.webm';
-            else if (mimeType.includes('ogg')) fileExtension = '.ogg';
-            else if (mimeType.includes('wav')) fileExtension = '.wav';
-            else if (mimeType.includes('flac')) fileExtension = '.flac';
-            else if (mimeType.includes('m4a')) fileExtension = '.m4a';
-            else if (mimeType.includes('mp3')) fileExtension = '.mp3';
-          }
-          
-          localFilePath = path.join(UPLOADS_DIR, `${jobId}${fileExtension}`);
-          
-          // Convert base64 to file
-          const buffer = Buffer.from(data, 'base64');
-          writeFileSync(localFilePath, buffer);
-          console.log('✅ Blob data saved to file');
+          // Add job to queue
+          jobQueue.enqueue({
+            jobId: jobId,
+            url: originalUrl || 'blob-data',
+            handler: async () => {
+              return new Promise((resolve, reject) => {
+                try {
+                  // Determine file extension from MIME type
+                  let fileExtension = '.mp3'; // default
+                  if (mimeType) {
+                    if (mimeType.includes('mp4')) fileExtension = '.mp4';
+                    else if (mimeType.includes('webm')) fileExtension = '.webm';
+                    else if (mimeType.includes('ogg')) fileExtension = '.ogg';
+                    else if (mimeType.includes('wav')) fileExtension = '.wav';
+                    else if (mimeType.includes('flac')) fileExtension = '.flac';
+                    else if (mimeType.includes('m4a')) fileExtension = '.m4a';
+                    else if (mimeType.includes('mp3')) fileExtension = '.mp3';
+                  }
+                  
+                  const localFilePath = path.join(UPLOADS_DIR, `${jobId}${fileExtension}`);
+                  
+                  // Convert base64 to file
+                  const buffer = Buffer.from(data, 'base64');
+                  writeFileSync(localFilePath, buffer);
+                  console.log(`✅ [QUEUE] Blob data saved to file: ${jobId}${fileExtension}`);
+
+                  // Transcribe
+                  console.log(`🎙️  [TRANSCRIBE] Starting transcription for job ${jobId}...`);
+                  const transcript = transcribe(localFilePath);
+                  console.log(`✅ [TRANSCRIBE] Transcription complete for job ${jobId}`);
+
+                  const resultMessage = JSON.stringify({
+                    type: 'transcription_done',
+                    payload: { 
+                      id: jobId, 
+                      transcript,
+                      source: source || 'unknown',
+                      element: element || 'unknown',
+                      pageUrl: pageUrl || 'unknown'
+                    }
+                  });
+                  wss.clients.forEach(client => {
+                    if (client.readyState === WebSocket.OPEN) client.send(resultMessage);
+                  });
+
+                  // Clean up
+                  if (existsSync(localFilePath)) {
+                    unlink(localFilePath, err => {
+                      if (err) console.error(`⚠️  Error deleting temp file:`, err);
+                    });
+                  }
+
+                  resolve();
+                } catch (error) {
+                  console.error(`❌ [TRANSCRIBE] Blob transcription failed for job ${jobId}:`, error.message);
+                  
+                  const errorMessage = JSON.stringify({
+                    type: 'transcription_failed',
+                    payload: { 
+                      id: jobId, 
+                      error: error.message,
+                      source: source || 'unknown',
+                      element: element || 'unknown',
+                      pageUrl: pageUrl || 'unknown'
+                    }
+                  });
+                  wss.clients.forEach(client => {
+                    if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
+                  });
+
+                  reject(error);
+                }
+              });
+            }
+          });
+
+          // Notify client that job was queued
+          const queuedMessage = JSON.stringify({
+            type: 'transcription_queued',
+            payload: { 
+              id: jobId, 
+              queuePosition: jobQueue.getStatus().queueSize,
+              source: source || 'unknown',
+              element: element || 'unknown',
+              pageUrl: pageUrl || 'unknown'
+            }
+          });
+          wss.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) client.send(queuedMessage);
+          });
 
         } else if (type === 'url') {
           // Handle regular URL
@@ -869,55 +1136,89 @@ wss.on('connection', ws => {
             throw new Error('URL is required for type "url"');
           }
           
-          console.log('📥 Downloading audio file...');
-          const fileExtension = path.extname(new URL(url).pathname) || '.mp3';
-          localFilePath = path.join(UPLOADS_DIR, `${jobId}${fileExtension}`);
-          await downloadFile(url, localFilePath);
-          console.log('✅ Download complete');
+          console.log(`📥 [QUEUE] Processing URL download: ${url.substring(0, 100)}...`);
+          
+          // Add job to queue
+          jobQueue.enqueue({
+            jobId: jobId,
+            url: url,
+            handler: async () => {
+              return new Promise(async (resolve, reject) => {
+                try {
+                  console.log(`🔗 [DOWNLOAD] Downloading file for job ${jobId}...`);
+                  const fileExtension = path.extname(new URL(url).pathname) || '.mp3';
+                  const localFilePath = path.join(UPLOADS_DIR, `${jobId}${fileExtension}`);
+                  await downloadFile(url, localFilePath);
+                  console.log(`✅ [DOWNLOAD] Download complete for job ${jobId}`);
+                  
+                  // Transcribe
+                  console.log(`🎙️  [TRANSCRIBE] Starting transcription for job ${jobId}...`);
+                  const transcript = transcribe(localFilePath);
+                  console.log(`✅ [TRANSCRIBE] Transcription complete for job ${jobId}`);
+
+                  const resultMessage = JSON.stringify({
+                    type: 'transcription_done',
+                    payload: { 
+                      id: jobId, 
+                      transcript,
+                      source: source || 'unknown',
+                      element: element || 'unknown',
+                      pageUrl: pageUrl || 'unknown'
+                    }
+                  });
+                  wss.clients.forEach(client => {
+                    if (client.readyState === WebSocket.OPEN) client.send(resultMessage);
+                  });
+
+                  // Clean up
+                  if (existsSync(localFilePath)) {
+                    unlink(localFilePath, err => {
+                      if (err) console.error(`⚠️  Error deleting temp file:`, err);
+                    });
+                  }
+
+                  resolve();
+                } catch (error) {
+                  console.error(`❌ [TRANSCRIBE] URL transcription failed for job ${jobId}:`, error.message);
+                  
+                  const errorMessage = JSON.stringify({
+                    type: 'transcription_failed',
+                    payload: { 
+                      id: jobId, 
+                      error: error.message,
+                      source: source || 'unknown',
+                      element: element || 'unknown',
+                      pageUrl: pageUrl || 'unknown'
+                    }
+                  });
+                  wss.clients.forEach(client => {
+                    if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
+                  });
+
+                  reject(error);
+                }
+              });
+            }
+          });
+
+          // Notify client that job was queued
+          const queuedMessage = JSON.stringify({
+            type: 'transcription_queued',
+            payload: { 
+              id: jobId, 
+              queuePosition: jobQueue.getStatus().queueSize,
+              source: source || 'unknown',
+              element: element || 'unknown',
+              pageUrl: pageUrl || 'unknown'
+            }
+          });
+          wss.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) client.send(queuedMessage);
+          });
           
         } else {
           throw new Error(`Unknown message type: ${type}`);
         }
-
-        console.log('🔄 Starting transcription...');
-        const transcript = transcribe(localFilePath);
-
-        const resultMessage = JSON.stringify({
-          type: 'transcription_done',
-          payload: { 
-            id: jobId, 
-            transcript,
-            source: source || 'unknown',
-            element: element || 'unknown',
-            pageUrl: pageUrl || 'unknown'
-          }
-        });
-        wss.clients.forEach(client => {
-          if (client.readyState === WebSocket.OPEN) client.send(resultMessage);
-        });
-
-      } catch (e) {
-        console.error(`❌ Transcription failed:`, e.message);
-        const errorMessage = JSON.stringify({
-          type: 'transcription_failed',
-          payload: { 
-            id: jobId, 
-            error: e.message,
-            source: source || 'unknown',
-            element: element || 'unknown',
-            pageUrl: pageUrl || 'unknown'
-          }
-        });
-        wss.clients.forEach(client => {
-          if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
-        });
-      } finally {
-        if (localFilePath) {
-          unlink(localFilePath, err => {
-            if (err) console.error(`⚠️  Error deleting temp file:`, err);
-          });
-        }
-      }
     } catch (parseError) {
       console.error('❌ Failed to parse message:', parseError.message);
     }
