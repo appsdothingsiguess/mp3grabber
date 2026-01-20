@@ -350,27 +350,166 @@ chrome.webRequest.onBeforeRequest.addListener(
   filter
 );
 
-// Optional: Manual trigger via keyboard shortcut (can be used to force reconnect)
+/**
+ * Flush pending streams immediately (skip debounce)
+ * Used when user manually triggers download
+ */
+async function flushPendingStreams() {
+  console.log('🚀 [FILTER] Flushing pending streams (manual trigger)');
+  
+  const streamsToFlush = Array.from(pendingStreams.entries());
+  
+  for (const [streamId, pending] of streamsToFlush) {
+    // Cancel the timeout
+    clearTimeout(pending.timeout);
+    
+    // Send immediately
+    console.log(`⚡ [FILTER] Sending pending stream immediately: ${streamId}`);
+    await sendStreamToRelay(streamId, pending.url, pending.cookies, pending.details);
+  }
+  
+  console.log(`✅ [FILTER] Flushed ${streamsToFlush.length} pending stream(s)`);
+}
+
+// Optional: Manual trigger via keyboard shortcut
 chrome.commands.onCommand.addListener(async (cmd) => {
-  console.log(`MP3 Grabber: Command received: ${cmd}`);
+  console.log(`🎹 [COMMAND] Command received: ${cmd}`);
   
   if (cmd === "grab-mp3") {
-    console.log("MP3 Grabber: Manual trigger - ensuring WebSocket connection");
+    console.log("🎯 [COMMAND] Manual trigger - activating stream detection");
     
     try {
+      // Step 1: Ensure WebSocket connection
       const activeSocket = await connect();
-      console.log("MP3 Grabber: WebSocket connection verified, readyState:", activeSocket.readyState);
+      console.log("🔌 [COMMAND] WebSocket connection verified, readyState:", activeSocket.readyState);
       
-      // Send a ping message to verify connection
-      if (activeSocket.readyState === WebSocket.OPEN) {
-        activeSocket.send(JSON.stringify({ 
-          type: 'ping', 
-          timestamp: Date.now() 
-        }));
-        console.log("MP3 Grabber: Ping sent to relay server");
+      if (activeSocket.readyState !== WebSocket.OPEN) {
+        console.warn("⚠️  [COMMAND] WebSocket not open, cannot proceed");
+        return;
       }
+      
+      // Step 2: Send ping to verify connection
+      activeSocket.send(JSON.stringify({ 
+        type: 'ping', 
+        timestamp: Date.now() 
+      }));
+      console.log("📡 [COMMAND] Ping sent to relay server");
+      
+      // Step 3: Flush any pending streams immediately (skip debounce)
+      await flushPendingStreams();
+      
+      // Step 4: Query all tabs and trigger content script search
+      try {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        
+        if (tabs.length === 0) {
+          console.warn("⚠️  [COMMAND] No active tabs found");
+          return;
+        }
+        
+        // Send message to active tab's content script
+        for (const tab of tabs) {
+          if (tab.id) {
+            console.log(`📨 [COMMAND] Sending search request to tab ${tab.id}: ${tab.url}`);
+            
+            try {
+              const response = await chrome.tabs.sendMessage(tab.id, {
+                action: 'findAudioLinks',
+                manualTrigger: true,
+                timestamp: Date.now()
+              });
+              
+              if (response && response.success) {
+                console.log(`✅ [COMMAND] Content script found ${response.audioData?.length || 0} audio/video element(s)`);
+                
+                // Process any found URLs or blob data
+                if (response.audioData && response.audioData.length > 0) {
+                  for (const audioItem of response.audioData) {
+                    // Handle blob data (already converted to base64 in content script)
+                    if (audioItem.type === 'blob' && audioItem.data) {
+                      console.log(`📦 [COMMAND] Found blob data from content script (${audioItem.size} bytes, ${audioItem.mimeType})`);
+                      
+                      try {
+                        if (activeSocket.readyState === WebSocket.OPEN) {
+                          const payload = {
+                            type: 'blob',
+                            data: audioItem.data,
+                            mimeType: audioItem.mimeType,
+                            size: audioItem.size,
+                            originalUrl: audioItem.originalUrl || 'blob:',
+                            source: 'content-script',
+                            pageUrl: tab.url || 'unknown',
+                            timestamp: Date.now()
+                          };
+                          
+                          activeSocket.send(JSON.stringify(payload));
+                          console.log(`✅ [COMMAND] Blob data sent to relay server`);
+                        }
+                      } catch (error) {
+                        console.error(`❌ [COMMAND] Error sending blob data:`, error);
+                      }
+                    }
+                    // Handle regular URLs (streams)
+                    else if (audioItem.type === 'url' && audioItem.url) {
+                      const url = audioItem.url;
+                      const urlLower = url.toLowerCase();
+                      
+                      // Check if it's a stream URL
+                      if (urlLower.includes('.m3u8') || urlLower.endsWith('.mpd')) {
+                        console.log(`🎯 [COMMAND] Found stream URL from content script: ${url.substring(0, 100)}`);
+                        
+                        // Get cookies and process
+                        try {
+                          const cookies = await chrome.cookies.getAll({ url: url });
+                          await processStream(url, cookies, {
+                            initiator: tab.url || 'unknown',
+                            tabId: tab.id
+                          });
+                        } catch (error) {
+                          console.error(`❌ [COMMAND] Error processing stream from content script:`, error);
+                        }
+                      } else {
+                        // Regular media URL (not a stream manifest)
+                        console.log(`🎵 [COMMAND] Found media URL from content script: ${url.substring(0, 100)}`);
+                        
+                        try {
+                          if (activeSocket.readyState === WebSocket.OPEN) {
+                            const payload = {
+                              type: 'url',
+                              url: url,
+                              source: 'content-script',
+                              pageUrl: tab.url || 'unknown',
+                              timestamp: Date.now()
+                            };
+                            
+                            activeSocket.send(JSON.stringify(payload));
+                            console.log(`✅ [COMMAND] Media URL sent to relay server`);
+                          }
+                        } catch (error) {
+                          console.error(`❌ [COMMAND] Error sending media URL:`, error);
+                        }
+                      }
+                    }
+                  }
+                }
+              } else {
+                console.log(`ℹ️  [COMMAND] Content script response:`, response);
+              }
+            } catch (error) {
+              // Content script might not be loaded on this page
+              console.log(`ℹ️  [COMMAND] Could not send message to tab ${tab.id}:`, error.message);
+              console.log(`   (This is normal for pages without content script support)`);
+            }
+          }
+        }
+      } catch (error) {
+        console.error("❌ [COMMAND] Error querying tabs:", error);
+      }
+      
+      console.log("✅ [COMMAND] Manual trigger complete");
+      
     } catch (error) {
-      console.error("MP3 Grabber: Failed to connect to relay server:", error);
+      console.error("❌ [COMMAND] Failed to process manual trigger:", error);
     }
   }
 });

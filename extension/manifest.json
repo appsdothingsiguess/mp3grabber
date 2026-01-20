@@ -2,7 +2,7 @@
     "manifest_version": 3,
     "name": "MP3 Sniper",
     "version": "0.4",
-    "permissions": ["webRequest", "cookies", "storage"],
+    "permissions": ["webRequest", "cookies", "storage", "tabs"],
     "host_permissions": ["<all_urls>"],
     "commands": {
       "grab-mp3": {
