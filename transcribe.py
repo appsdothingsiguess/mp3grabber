@@ -155,19 +155,27 @@ if __name__ == "__main__":
         print(json.dumps({"success": False, "error": f"Audio file not found: {audio_file}"}))
         sys.exit(1)
     
-    # Check GPU availability first
-    gpu_available = check_gpu_availability()
+    # Check if CPU mode is forced via environment variable
+    force_cpu = os.environ.get('FORCE_CPU', '').lower() in ('1', 'true', 'yes')
     
-    # Try GPU first if available, otherwise use CPU
-    # Use "medium" model for GPU, "base" model for CPU (better performance on CPU)
-    if gpu_available:
-        result = transcribe_audio(audio_file, model_size="medium", use_gpu=True)
-        if not result["success"] and ("CUDA" in result["error"] or "cudnn" in result["error"].lower() or "cublas" in result["error"].lower()):
-            # Fallback to CPU if GPU fails
-            result = transcribe_audio(audio_file, model_size="base", use_gpu=False)
-    else:
-        # Use CPU directly with base model
+    if force_cpu:
+        print("DEBUG:FORCE_CPU is set, using CPU mode", flush=True)
+        # Force CPU mode - skip GPU check entirely
         result = transcribe_audio(audio_file, model_size="base", use_gpu=False)
+    else:
+        # Check GPU availability first
+        gpu_available = check_gpu_availability()
+        
+        # Try GPU first if available, otherwise use CPU
+        # Use "medium" model for GPU, "base" model for CPU (better performance on CPU)
+        if gpu_available:
+            result = transcribe_audio(audio_file, model_size="medium", use_gpu=True)
+            if not result["success"] and ("CUDA" in result["error"] or "cudnn" in result["error"].lower() or "cublas" in result["error"].lower()):
+                # Fallback to CPU if GPU fails
+                result = transcribe_audio(audio_file, model_size="base", use_gpu=False)
+        else:
+            # Use CPU directly with base model
+            result = transcribe_audio(audio_file, model_size="base", use_gpu=False)
     
     # Save transcription if successful
     if result["success"]:

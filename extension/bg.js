@@ -66,6 +66,9 @@ function cleanupDebounceSet() {
   }
 }
 
+// Track which base URLs we've already processed (to avoid multiple quality versions)
+const processedBaseUrls = new Map(); // url -> timestamp
+
 // Network request listener for stream detection
 const filter = {
   urls: ["<all_urls>"],
@@ -80,14 +83,28 @@ chrome.webRequest.onBeforeRequest.addListener(
     if (url.includes('.m3u8') || url.includes('.mpd')) {
       console.log('MP3 Grabber: Stream detected:', details.url);
       
-      // Debounce: skip if we've recently processed this URL
+      // Extract base URL (remove query parameters and variant info)
+      const baseUrl = details.url.split('?')[0].replace(/_(low|medium|high|[0-9]+p)\.m3u8/i, '.m3u8');
+      
+      // Debounce: skip if we've recently processed this base URL
       if (recentlyProcessedUrls.has(details.url)) {
-        console.log('MP3 Grabber: Skipping duplicate stream (debounced):', details.url);
+        console.log('MP3 Grabber: Skipping exact duplicate stream (debounced):', details.url);
         return;
       }
       
-      // Add to debounce set with timestamp
+      // Skip if we've processed the base URL recently (prevents multiple quality versions)
+      const now = Date.now();
+      if (processedBaseUrls.has(baseUrl)) {
+        const lastProcessed = processedBaseUrls.get(baseUrl);
+        if (now - lastProcessed < 10000) { // 10 second window for same base video
+          console.log('MP3 Grabber: Skipping quality variant of same video:', details.url);
+          return;
+        }
+      }
+      
+      // Add to debounce sets
       recentlyProcessedUrls.add(details.url);
+      processedBaseUrls.set(baseUrl, now);
       setTimeout(() => recentlyProcessedUrls.delete(details.url), 5000);
       
       // Periodically clean up the debounce set

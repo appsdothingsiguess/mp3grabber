@@ -3,6 +3,7 @@
 # Core Dependencies
 faster-whisper>=1.0.0      # High-performance Whisper implementation
 yt-dlp>=2023.0.0          # Stream downloader with HLS/DASH support
+numpy>=1.20.0             # Required for faster-whisper and GPU testing
 
 # Optional GPU Acceleration (NVIDIA only)
 # Uncomment if you have an NVIDIA GPU:

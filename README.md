@@ -25,7 +25,10 @@ The MP3 Grabber is a comprehensive automated transcription system that captures 
 - **Node.js** (version 14 or higher) - [Download here](https://nodejs.org/)
 - **Python** (version 3.9 or higher) - [Download here](https://python.org/)
 - **yt-dlp** (installed automatically by setup script) - For stream downloading
+- **ffmpeg** (installed automatically by setup script) - For stream processing
 - **NVIDIA GPU** (optional) - For GPU acceleration with CUDA
+
+**Note**: yt-dlp and ffmpeg are automatically installed during setup. If auto-installation fails, manual installation instructions will be provided.
 
 ## Quick Start
 
@@ -42,8 +45,8 @@ npm run setup:install
 ```
 
 **That's it!** This single command will:
-1. ✅ Check prerequisites (Node.js, Python, yt-dlp)
-2. 📦 Install all dependencies automatically
+1. ✅ Check prerequisites (Node.js, Python, yt-dlp, ffmpeg)
+2. 📦 Install all dependencies automatically (including ffmpeg)
 3. 🎮 Detect NVIDIA GPU and install CUDA libraries
 4. 🐍 Set up faster-whisper with GPU support
 5. 📁 Create necessary folders and configuration files

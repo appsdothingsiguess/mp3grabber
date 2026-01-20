@@ -18,6 +18,78 @@ const TRANSCRIPTIONS_DIR = path.join(__dirname, 'transcriptions');
 const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
 const PYTHON_SCRIPT = path.join(__dirname, 'transcribe.py');
 
+// Cache for Python executable path
+let pythonExecutable = null;
+
+/**
+ * Detect Python executable by trying common options and using 'where' on Windows
+ * Returns: full path to Python executable or simple command, or null if none found
+ */
+function detectPythonExecutable() {
+  if (pythonExecutable) {
+    return pythonExecutable; // Return cached result
+  }
+  
+  // Try common Python executables in order of preference
+  const candidates = ['py', 'python3', 'python'];
+  
+  for (const candidate of candidates) {
+    try {
+      // On Windows, use 'where' to find the full path to the executable
+      if (process.platform === 'win32') {
+        try {
+          const wherePath = execSync(`where ${candidate}`, { 
+            encoding: 'utf8', 
+            stdio: 'pipe',
+            timeout: 5000
+          }).trim().split('\n')[0]; // Get first result
+          
+          // Verify it works
+          execSync(`"${wherePath}" --version`, { 
+            encoding: 'utf8', 
+            stdio: 'pipe',
+            timeout: 5000
+          });
+          
+          pythonExecutable = wherePath;
+          console.log(`✅ Detected Python executable: ${wherePath}`);
+          return wherePath;
+        } catch (whereError) {
+          // 'where' failed, try direct command
+        }
+      }
+      
+      // On Unix or if 'where' failed, try direct command
+      execSync(`${candidate} --version`, { 
+        encoding: 'utf8', 
+        stdio: 'pipe',
+        timeout: 5000
+      });
+      pythonExecutable = candidate;
+      console.log(`✅ Detected Python executable: ${candidate}`);
+      return candidate;
+    } catch (error) {
+      // Try next candidate
+      continue;
+    }
+  }
+  
+  // None found
+  console.error('❌ Python executable not found. Tried: py, python3, python');
+  console.error('   Please ensure Python is installed and in your PATH');
+  return null;
+}
+
+/**
+ * Get properly quoted Python command for use in shell commands
+ */
+function getQuotedPythonCmd() {
+  const cmd = detectPythonExecutable();
+  if (!cmd) return null;
+  // Quote if path contains spaces (Windows full paths)
+  return cmd.includes(' ') ? `"${cmd}"` : cmd;
+}
+
 // Create Python transcription script if it doesn't exist
 if (!existsSync(PYTHON_SCRIPT)) {
   const pythonScript = `#!/usr/bin/env python3
@@ -241,17 +313,68 @@ function writeNetscapeCookieFile(cookies, filepath) {
 }
 
 // --- Transcription Function ---
-function transcribe(file) {
+function transcribe(file, forceCPU = false) {
     try {
-        console.log(`🔄 Transcribing audio file...`);
-        const result = execSync(`python "${PYTHON_SCRIPT}" "${file}"`, {
-            encoding: "utf8",
-            cwd: __dirname
-        });
+        console.log(`🔄 Transcribing audio file...${forceCPU ? ' (CPU mode)' : ''}`);
         
-        // Parse the output to extract JSON result
+        // Check for CUDA errors in stderr before parsing
+        let result;
+        try {
+            // Set environment variable to force CPU if needed
+            // Inherit current process.env which already has GPU paths configured at startup
+            const pythonEnv = { ...process.env };
+            if (forceCPU) {
+                pythonEnv.FORCE_CPU = '1';
+            }
+            
+            const pythonCmd = getQuotedPythonCmd();
+            if (!pythonCmd) {
+                throw new Error('Python executable not found. Please install Python and ensure it is in your PATH.');
+            }
+            
+            result = execSync(`${pythonCmd} "${PYTHON_SCRIPT}" "${file}"`, {
+                encoding: "utf8",
+                cwd: __dirname,
+                stdio: 'pipe', // Capture stderr too
+                env: pythonEnv
+            });
+        } catch (execError) {
+            // Check if it's a CUDA error
+            const errorOutput = (execError.stderr || execError.stdout || execError.message || '').toString();
+            const isCudaError = errorOutput.includes('cudnn') || 
+                               errorOutput.includes('cublas') || 
+                               errorOutput.includes('cudnn_ops64_9.dll') ||
+                               errorOutput.includes('cublas64_12.dll') ||
+                               errorOutput.includes('Invalid handle') ||
+                               execError.status === 3221226505; // Windows access violation (DLL error)
+            
+            if (isCudaError && !forceCPU) {
+                console.error(`⚠️  CUDA error detected: ${errorOutput.substring(0, 200)}`);
+                console.log(`💡 Retrying with CPU mode...`);
+                // Retry with CPU mode
+                return transcribe(file, true);
+            }
+            // Re-throw other errors or if already in CPU mode
+            throw execError;
+        }
+        
+        // Parse the output to extract JSON result and device info
         const lines = result.trim().split('\n');
         let jsonResult = null;
+        let deviceUsed = 'unknown';
+        
+        // Look for device status messages
+        for (const line of lines) {
+            if (line.includes('STATUS:Initializing CUDA processing')) {
+                deviceUsed = 'GPU';
+            } else if (line.includes('STATUS:Initializing CPU processing')) {
+                deviceUsed = 'CPU';
+            } else if (line.includes('STATUS:GPU confirmed')) {
+                deviceUsed = 'GPU';
+            } else if (line.includes('WARNING:GPU requested but CUDA not available')) {
+                deviceUsed = 'CPU (GPU fallback)';
+            }
+        }
         
         // Find the JSON line (should be the last line that starts with {)
         for (let i = lines.length - 1; i >= 0; i--) {
@@ -271,7 +394,9 @@ function transcribe(file) {
         }
         
         if (jsonResult.success) {
-            console.log(`✅ Transcription complete!`);
+            const device = jsonResult.device || deviceUsed;
+            const deviceIcon = device.toUpperCase() === 'CUDA' ? '🎮' : '💻';
+            console.log(`✅ Transcription complete! ${deviceIcon} Used: ${device.toUpperCase()}`);
             return jsonResult.transcript;
         } else {
             throw new Error(jsonResult.error || 'Transcription failed');
@@ -284,6 +409,96 @@ function transcribe(file) {
 
 // --- Express Server ---
 app.get('/', (_, res) => res.sendFile(path.join(__dirname, 'viewer.html')));
+
+// Configure GPU library paths on startup (Windows)
+if (process.platform === 'win32') {
+  try {
+    // Find actual library locations (they may be in different site-packages)
+    let cublasPath = null;
+    let cudnnPath = null;
+    
+    try {
+      // On Windows, DLLs are in 'bin' directory
+      // Python 3.13+: namespace packages have __file__=None, must use __path__[0]
+      const pythonCmd = getQuotedPythonCmd() || 'python';
+      const cublasLocation = execSync(`${pythonCmd} -c "import nvidia.cublas; print(nvidia.cublas.__path__[0])"`, { 
+        encoding: 'utf8',
+        stdio: 'pipe'
+      }).trim();
+      // Try 'bin' first (Windows standard), then 'lib' as fallback
+      const binPath = path.join(cublasLocation, 'bin');
+      const libPath = path.join(cublasLocation, 'lib');
+      cublasPath = existsSync(binPath) ? binPath : (existsSync(libPath) ? libPath : null);
+    } catch (e) {
+      // Try user site-packages fallback
+      try {
+        const pythonCmd = getQuotedPythonCmd() || 'python';
+        const userSite = execSync(`${pythonCmd} -c "import site; print(site.getusersitepackages())"`, { encoding: 'utf8', stdio: 'pipe' }).trim();
+        const binPath = path.join(userSite, 'nvidia', 'cublas', 'bin');
+        const libPath = path.join(userSite, 'nvidia', 'cublas', 'lib');
+        cublasPath = existsSync(binPath) ? binPath : (existsSync(libPath) ? libPath : null);
+      } catch (e2) {}
+    }
+    
+    try {
+      // On Windows, DLLs are in 'bin' directory
+      // Python 3.13+: namespace packages have __file__=None, must use __path__[0]
+      const pythonCmd = getQuotedPythonCmd() || 'python';
+      const cudnnLocation = execSync(`${pythonCmd} -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])"`, { 
+        encoding: 'utf8',
+        stdio: 'pipe'
+      }).trim();
+      // Try 'bin' first (Windows standard), then 'lib' as fallback
+      const binPath = path.join(cudnnLocation, 'bin');
+      const libPath = path.join(cudnnLocation, 'lib');
+      cudnnPath = existsSync(binPath) ? binPath : (existsSync(libPath) ? libPath : null);
+    } catch (e) {
+      // Try system site-packages fallback
+      try {
+        const pythonCmd = getQuotedPythonCmd() || 'python';
+        const sysSite = execSync(`${pythonCmd} -c "import site; print(site.getsitepackages()[0])"`, { encoding: 'utf8', stdio: 'pipe' }).trim();
+        const binPath = path.join(sysSite, 'nvidia', 'cudnn', 'bin');
+        const libPath = path.join(sysSite, 'nvidia', 'cudnn', 'lib');
+        cudnnPath = existsSync(binPath) ? binPath : (existsSync(libPath) ? libPath : null);
+      } catch (e2) {}
+    }
+    
+    // Add to PATH if directories exist
+    const pathsToAdd = [];
+    if (cublasPath && existsSync(cublasPath)) {
+      pathsToAdd.push(cublasPath);
+    }
+    if (cudnnPath && existsSync(cudnnPath)) {
+      pathsToAdd.push(cudnnPath);
+    }
+    
+    if (pathsToAdd.length > 0) {
+      if (process.env.PATH) {
+        process.env.PATH = `${pathsToAdd.join(';')};${process.env.PATH}`;
+      } else {
+        process.env.PATH = pathsToAdd.join(';');
+      }
+      console.log(`✅ GPU library paths configured for relay server (${pathsToAdd.length} paths)`);
+      if (cublasPath) console.log(`   cuBLAS: ${cublasPath}`);
+      if (cudnnPath) console.log(`   cuDNN: ${cudnnPath}`);
+    } else {
+      console.warn('⚠️  GPU library paths NOT configured - GPU may not work');
+      console.warn('   Install: pip install nvidia-cublas-cu12 nvidia-cudnn-cu12');
+    }
+  } catch (pathError) {
+    // GPU libraries not installed or path error - will use CPU fallback
+  }
+}
+
+// Detect Python executable on startup
+const pythonCmd = detectPythonExecutable();
+if (!pythonCmd) {
+  console.error('⚠️  WARNING: Python executable not found!');
+  console.error('   Transcription will fail until Python is installed and in PATH.');
+  console.error('   Tried: py, python3, python');
+} else {
+  console.log(`✅ Python executable detected: ${pythonCmd}`);
+}
 
 const server = app.listen(PORT, () => {
   console.log(`🚀 Relay server listening on port ${PORT}`);
@@ -401,10 +616,14 @@ wss.on('connection', ws => {
           if (cookies && cookies.length > 0) {
             ytdlpArgs.push('--cookies', cookieFilePath);
           }
+          // Format selection: best single file (prefer audio+video, fallback to best video)
+          ytdlpArgs.push('-f', 'best');
+          // Use ffmpeg if available to fix stream issues
+          ytdlpArgs.push('--postprocessor-args', 'ffmpeg:-fflags +genpts');
           ytdlpArgs.push('-o', outputTemplate);
           ytdlpArgs.push(url);
           
-          console.log(`🔧 Running: yt-dlp ${ytdlpArgs.join(' ')}`);
+          console.log(`📥 Downloading stream with yt-dlp (output hidden, showing important messages only)...`);
           
           // Spawn yt-dlp process
           const ytdlpProcess = spawn('yt-dlp', ytdlpArgs, {
@@ -417,11 +636,19 @@ wss.on('connection', ws => {
           ytdlpProcess.stdout.on('data', (data) => {
             const output = data.toString();
             stdoutData += output;
-            // Log progress lines (yt-dlp outputs download progress)
+            
+            // Only log important messages, filter out progress spam
             const lines = output.split('\n');
             lines.forEach(line => {
-              if (line.trim()) {
-                console.log(`   [yt-dlp] ${line.trim()}`);
+              const trimmed = line.trim();
+              if (!trimmed) return;
+              
+              // Filter out progress lines (percentage, ETA, download speed)
+              if (trimmed.match(/\d+%|ETA|iB\/s|KiB\/s|MiB\/s/)) return;
+              
+              // Only log important messages
+              if (trimmed.match(/\[download\] Destination:|Merging formats|Deleting original file|already been downloaded|Fixing/i)) {
+                console.log(`   [yt-dlp] ${trimmed}`);
               }
             });
           });
@@ -429,7 +656,18 @@ wss.on('connection', ws => {
           ytdlpProcess.stderr.on('data', (data) => {
             const output = data.toString();
             stderrData += output;
-            console.error(`   [yt-dlp stderr] ${output.trim()}`);
+            
+            // Only log warnings and errors, not info messages
+            const lines = output.split('\n');
+            lines.forEach(line => {
+              const trimmed = line.trim();
+              if (!trimmed) return;
+              
+              // Log warnings and errors
+              if (trimmed.match(/WARNING|ERROR|error/i)) {
+                console.error(`   [yt-dlp] ${trimmed}`);
+              }
+            });
           });
           
           ytdlpProcess.on('close', (code) => {
@@ -437,7 +675,7 @@ wss.on('connection', ws => {
             if (cookies && cookies.length > 0 && existsSync(cookieFilePath)) {
               unlink(cookieFilePath, (err) => {
                 if (err) console.error(`⚠️  Error deleting cookie file:`, err);
-                else console.log(`✅ Cookie file deleted: ${cookieFilePath}`);
+                // Success is silent - no need to log
               });
             }
             
@@ -457,22 +695,50 @@ wss.on('connection', ws => {
                 console.log(`📄 Found downloaded file: ${downloadedFile}`);
                 
                 // Proceed with transcription
-                console.log('🔄 Starting transcription...');
-                const transcript = transcribe(localFilePath);
+                try {
+                  console.log('🔄 Starting transcription...');
+                  const transcript = transcribe(localFilePath);
 
-                const resultMessage = JSON.stringify({
-                  type: 'transcription_done',
-                  payload: { 
-                    id: jobId, 
-                    transcript,
-                    source: source || 'sniffer',
-                    element: element || 'stream',
-                    pageUrl: pageUrl || 'unknown'
+                  const resultMessage = JSON.stringify({
+                    type: 'transcription_done',
+                    payload: { 
+                      id: jobId, 
+                      transcript,
+                      source: source || 'sniffer',
+                      element: element || 'stream',
+                      pageUrl: pageUrl || 'unknown'
+                    }
+                  });
+                  wss.clients.forEach(client => {
+                    if (client.readyState === WebSocket.OPEN) client.send(resultMessage);
+                  });
+                } catch (transcribeError) {
+                  console.error(`❌ Transcription failed:`, transcribeError.message);
+                  
+                  // Check if it's a CUDA error that should fall back to CPU
+                  const isCudaError = transcribeError.message.includes('CUDA') || 
+                                     transcribeError.message.includes('cudnn') ||
+                                     transcribeError.message.includes('cublas');
+                  
+                  if (isCudaError) {
+                    console.log(`💡 CUDA error detected, transcription will use CPU on next attempt`);
+                    console.log(`💡 To fix: Run 'npm run setup:install' to configure GPU libraries`);
                   }
-                });
-                wss.clients.forEach(client => {
-                  if (client.readyState === WebSocket.OPEN) client.send(resultMessage);
-                });
+                  
+                  const errorMessage = JSON.stringify({
+                    type: 'transcription_failed',
+                    payload: { 
+                      id: jobId, 
+                      error: `Transcription failed: ${transcribeError.message}`,
+                      source: source || 'sniffer',
+                      element: element || 'stream',
+                      pageUrl: pageUrl || 'unknown'
+                    }
+                  });
+                  wss.clients.forEach(client => {
+                    if (client.readyState === WebSocket.OPEN) client.send(errorMessage);
+                  });
+                }
                 
               } catch (scanError) {
                 console.error(`❌ Error finding downloaded file:`, scanError.message);
