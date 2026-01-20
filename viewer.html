@@ -14,6 +14,7 @@
         .status-processing { color: #f39c12; }
         .status-done { color: #2ecc71; }
         .status-failed { color: #e74c3c; }
+        .status-skipped { color: #95a5a6; }
         .url-cell { max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .result-cell { max-width: 600px; white-space: pre-wrap; word-wrap: break-word; }
     </style>
@@ -64,6 +65,9 @@
                     case 'transcription_failed':
                         handleTranscriptionFailed(message.payload);
                         break;
+                    case 'transcription_skipped':
+                        handleTranscriptionSkipped(message.payload);
+                        break;
                     default:
                         console.warn('Received unknown message type:', message.type);
                 }
@@ -105,6 +109,17 @@
                 statusCell.textContent = 'Failed';
                 statusCell.className = 'status-failed';
                 resultCell.textContent = error;
+            }
+        }
+
+        function handleTranscriptionSkipped({ id, reason, url }) {
+            const statusCell = document.getElementById(`status-${id}`);
+            const resultCell = document.getElementById(`result-${id}`);
+
+            if (statusCell && resultCell) {
+                statusCell.textContent = 'Skipped';
+                statusCell.className = 'status-skipped';
+                resultCell.textContent = reason;
             }
         }
     </script>

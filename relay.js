@@ -3,7 +3,7 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createWriteStream, unlink, existsSync, mkdirSync, writeFileSync, readdirSync } from 'fs';
+import { createWriteStream, unlink, existsSync, mkdirSync, writeFileSync, readdirSync, statSync } from 'fs';
 import { get } from 'https';
 import { execSync, spawn } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
@@ -317,6 +317,12 @@ function transcribe(file, forceCPU = false) {
     try {
         console.log(`🔄 Transcribing audio file...${forceCPU ? ' (CPU mode)' : ''}`);
         
+        // Validate file size before attempting transcription
+        const stats = statSync(file);
+        if (stats.size < 1000) {
+            throw new Error(`File too small to be valid audio/video (${stats.size} bytes). This may be a subtitle or caption file.`);
+        }
+        
         // Check for CUDA errors in stderr before parsing
         let result;
         try {
@@ -596,6 +602,31 @@ wss.on('connection', ws => {
 
         // Handle stream_found (yt-dlp with cookies)
         if (type === 'stream_found') {
+          // Filter out subtitle/caption URLs (WebVTT, SRT, etc.)
+          const isSubtitleUrl = url.includes('caption') || 
+                               url.includes('subtitle') || 
+                               url.includes('serveWebVTT') || 
+                               url.includes('.vtt') || 
+                               url.includes('.srt') ||
+                               url.includes('captionasset') ||
+                               url.includes('caption_captionasset');
+          
+          if (isSubtitleUrl) {
+            console.log(`⏭️  Skipping subtitle/caption URL: ${url.substring(0, 100)}...`);
+            const skipMessage = JSON.stringify({
+              type: 'transcription_skipped',
+              payload: { 
+                id: jobId, 
+                reason: 'Subtitle/caption file detected',
+                url: url
+              }
+            });
+            wss.clients.forEach(client => {
+              if (client.readyState === WebSocket.OPEN) client.send(skipMessage);
+            });
+            return; // Skip processing this URL
+          }
+          
           console.log(`📥 Processing stream with yt-dlp (${url})...`);
           
           if (!cookies || cookies.length === 0) {

@@ -42,8 +42,15 @@ def transcribe_audio(audio_file, model_size="medium", use_gpu=True):
             print(f"STATUS:Model downloaded and loaded ({load_time:.1f}s)", flush=True)
         
         print(f"STATUS:Starting transcription...", flush=True)
-        # Transcribe
-        segments, info = model.transcribe(audio_file, beam_size=5)
+        # Transcribe with error handling for invalid files
+        try:
+            segments, info = model.transcribe(audio_file, beam_size=5)
+        except (ValueError, IndexError, TypeError) as transcribe_error:
+            # This can happen with invalid audio files, subtitle files, or corrupted media
+            error_msg = str(transcribe_error)
+            if "tuple index out of range" in error_msg or "list index out of range" in error_msg:
+                raise ValueError(f"Invalid audio file format. This may be a subtitle/caption file or corrupted media. Original error: {error_msg}")
+            raise
         
         print(f"STATUS:Processing segments...", flush=True)
         # Collect segments with timestamps
