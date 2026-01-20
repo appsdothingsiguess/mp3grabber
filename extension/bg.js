@@ -253,15 +253,11 @@ async function sendStreamToRelay(streamId, url, cookies, details) {
     url: url.substring(0, 100) + '...'
   });
   
-  // Remove from pending
+  // Remove from pending and get priority
+  const pending = pendingStreams.get(streamId);
+  const priority = pending ? pending.priority : getStreamPriority(url);
   pendingStreams.delete(streamId);
-  
-  // Mark as processed
-  processedBaseUrls.set(streamId, {
-    url: url,
-    timestamp: Date.now(),
-    priority: getStreamPriority(url)
-  });
+  processedBaseUrls.set(streamId, { url, timestamp: Date.now(), priority });
   
   try {
     // Ensure WebSocket connection is open
@@ -528,4 +524,145 @@ console.log('🔌 Establishing WebSocket connection...');
 connect().catch(err => {
   console.error('❌ Initial connection failed:', err);
   console.log('🔄 Will retry when stream is detected');
+});
+
+// Handle popup messages
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'queueAllVideos') {
+    console.log('🎯 [POPUP] Queue All Videos triggered for tab:', request.tabId);
+    
+    (async () => {
+      try {
+        const activeSocket = await connect();
+        
+        if (activeSocket.readyState !== WebSocket.OPEN) {
+          sendResponse({ success: false, error: 'WebSocket not connected' });
+          return;
+        }
+        
+        // Flush pending streams first
+        await flushPendingStreams();
+        
+        // Query the tab for videos
+        let response;
+        try {
+          response = await chrome.tabs.sendMessage(request.tabId, {
+            action: 'findAudioLinks',
+            manualTrigger: true,
+            timestamp: Date.now()
+          });
+        } catch (sendError) {
+          // Content script might not be loaded yet, try to inject it
+          if (sendError.message.includes('Could not establish connection')) {
+            console.log('🔄 [POPUP] Content script not loaded, attempting to inject...');
+            try {
+              await chrome.scripting.executeScript({
+                target: { tabId: request.tabId },
+                files: ['content.js']
+              });
+              // Wait a bit for script to initialize
+              await new Promise(resolve => setTimeout(resolve, 500));
+              // Try again
+              response = await chrome.tabs.sendMessage(request.tabId, {
+                action: 'findAudioLinks',
+                manualTrigger: true,
+                timestamp: Date.now()
+              });
+            } catch (injectError) {
+              throw new Error(`Failed to inject content script: ${injectError.message}`);
+            }
+          } else {
+            throw sendError;
+          }
+        }
+        
+        let count = 0;
+        
+        if (response && response.audioData) {
+          for (const audioItem of response.audioData) {
+            if (audioItem.type === 'url' && audioItem.url) {
+              const url = audioItem.url;
+              const urlLower = url.toLowerCase();
+              
+              if (urlLower.includes('.m3u8') || urlLower.endsWith('.mpd')) {
+                const cookies = await chrome.cookies.getAll({ url: url });
+                await processStream(url, cookies, { tabId: request.tabId });
+                count++;
+              }
+            }
+          }
+        }
+        
+        sendResponse({ success: true, count: count });
+      } catch (error) {
+        console.error('❌ [POPUP] Error queuing videos:', error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    
+    return true; // Keep message channel open
+  }
+  
+  if (request.action === 'flushAllStreams') {
+    console.log('🎯 [POPUP] Flush All Streams triggered');
+    
+    (async () => {
+      try {
+        const activeSocket = await connect();
+
+        // Clear relay's deduplication before re-queueing
+        activeSocket.send(JSON.stringify({ 
+          type: 'clear_completed', 
+          timestamp: Date.now() 
+        }));
+
+        // Give relay time to process clear command
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        if (activeSocket.readyState !== WebSocket.OPEN) {
+          sendResponse({ success: false, error: 'WebSocket not connected' });
+          return;
+        }
+        
+        // Get count of both pending AND recently processed streams
+        const pendingCount = pendingStreams.size;
+        const recentlyProcessed = Array.from(processedBaseUrls.entries())
+          .filter(([_, data]) => Date.now() - data.timestamp < 300000); // Last 5 minutes
+        
+        const totalCount = pendingCount + recentlyProcessed.length;
+        
+        if (totalCount === 0) {
+          sendResponse({ success: true, count: 0 });
+          return;
+        }
+        
+        console.log(`📦 [POPUP] Re-queueing ${recentlyProcessed.length} recently processed streams`);
+        
+        // Flush pending streams
+        await flushPendingStreams();
+        
+        // Re-queue recently processed streams
+        for (const [streamId, data] of recentlyProcessed) {
+          console.log(`🔄 [POPUP] Re-queueing: ${streamId}`);
+          await sendStreamToRelay(streamId, data.url, [], { source: 'popup-requeue' });
+        }
+        
+        sendResponse({ success: true, count: totalCount });
+      } catch (error) {
+        console.error('❌ [POPUP] Error flushing streams:', error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    
+    return true;
+  }
+  
+  if (request.action === 'manualTrigger') {
+    chrome.commands.onCommand.addListener((cmd) => {
+      if (cmd === 'grab-mp3') {
+        // Trigger existing manual logic
+      }
+    });
+    sendResponse({ success: true });
+  }
 });

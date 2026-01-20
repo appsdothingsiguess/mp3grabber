@@ -783,6 +783,17 @@ wss.on('connection', ws => {
         return;
       }
 
+      if (type === 'clear_completed') {
+        console.log('🧹 [RELAY] Clearing completed job IDs (manual queue request)');
+        jobQueue.completedIds.clear();
+        ws.send(JSON.stringify({ 
+          type: 'clear_completed_ack', 
+          cleared: true,
+          timestamp: Date.now() 
+        }));
+        return;
+      }
+
       const jobId = uuidv4();
       
       console.log(`🔄 [QUEUE] New transcription request: ${jobId}`);
