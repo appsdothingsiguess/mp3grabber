@@ -19,6 +19,9 @@ const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const PYTHON_SCRIPT = path.join(__dirname, 'transcribe.py');
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 
+// Resolved Python path (set during prerequisite check)
+let RESOLVED_PYTHON_PATH = null;
+
 // Colors for console output
 const colors = {
   reset: '\x1b[0m',
@@ -41,7 +44,10 @@ function question(prompt) {
   });
 }
 
-// Config management functions
+// ============================================================================
+// CONFIG MANAGEMENT
+// ============================================================================
+
 function loadConfig() {
   try {
     if (existsSync(CONFIG_FILE)) {
@@ -51,7 +57,7 @@ function loadConfig() {
   } catch (error) {
     log('⚠️  Could not load config file, using defaults', 'yellow');
   }
-  return { installCompleted: false, lastInstallDate: null, version: "1.0.0" };
+  return { installCompleted: false, lastInstallDate: null, version: "1.0.0", PYTHON_PATH: null };
 }
 
 function saveConfig(config) {
@@ -62,6 +68,189 @@ function saveConfig(config) {
     log('⚠️  Could not save config file', 'yellow');
     return false;
   }
+}
+
+// ============================================================================
+// PYTHON PATH RESOLUTION (Windows Fix)
+// ============================================================================
+
+/**
+ * Resolve absolute Python executable path
+ * Uses sys.executable to get the real path, not just "python" or "py"
+ */
+function resolvePythonPath(candidateCommand = 'python') {
+  try {
+    log(`🔍 Resolving Python path from: ${candidateCommand}`, 'cyan');
+    
+    // Try to get absolute path using sys.executable
+    const resolvedPath = execSync(
+      `"${candidateCommand}" -c "import sys; print(sys.executable)"`,
+      { 
+        encoding: 'utf8',
+        stdio: 'pipe',
+        timeout: 10000
+      }
+    ).trim();
+    
+    // Verify the path exists
+    if (!existsSync(resolvedPath)) {
+      throw new Error(`Resolved path does not exist: ${resolvedPath}`);
+    }
+    
+    log(`✅ Resolved Python path: ${resolvedPath}`, 'green');
+    return resolvedPath;
+    
+  } catch (error) {
+    // If candidate command fails, try alternatives
+    if (candidateCommand === 'python') {
+      log(`   Trying alternative: py`, 'yellow');
+      return resolvePythonPath('py');
+    } else if (candidateCommand === 'py') {
+      log(`   Trying alternative: python3`, 'yellow');
+      return resolvePythonPath('python3');
+    }
+    
+    throw new Error(`Failed to resolve Python path: ${error.message}`);
+  }
+}
+
+/**
+ * Validate Python path can import required packages
+ * Verifies faster_whisper is accessible
+ */
+function validatePythonPath(pythonPath) {
+  try {
+    log(`🔍 Validating Python path can import faster_whisper...`, 'cyan');
+    
+    execSync(
+      `"${pythonPath}" -c "import faster_whisper; print('OK')"`,
+      { 
+        encoding: 'utf8',
+        stdio: 'pipe',
+        timeout: 10000
+      }
+    );
+    
+    log(`✅ Python path validated - faster_whisper accessible`, 'green');
+    return true;
+    
+  } catch (error) {
+    log(`❌ Python path validation failed: ${error.message}`, 'red');
+    log(`   The resolved Python cannot import faster_whisper`, 'yellow');
+    log(`   This may indicate packages were installed to a different Python`, 'yellow');
+    return false;
+  }
+}
+
+/**
+ * Detect and lock Python executable path
+ * Resolves absolute path and validates package access
+ */
+function detectAndLockPythonPath() {
+  try {
+    // Try to resolve from common commands
+    let pythonPath = null;
+    
+    // Try python first
+    try {
+      pythonPath = resolvePythonPath('python');
+    } catch (error) {
+      // Try py (Windows Python Launcher)
+      try {
+        pythonPath = resolvePythonPath('py');
+      } catch (error2) {
+        // Try python3
+        try {
+          pythonPath = resolvePythonPath('python3');
+        } catch (error3) {
+          throw new Error('Could not find Python executable. Tried: python, py, python3');
+        }
+      }
+    }
+    
+    // Validate the resolved path
+    const isValid = validatePythonPath(pythonPath);
+    
+    if (!isValid) {
+      log(`⚠️  Warning: Resolved Python path cannot import faster_whisper`, 'yellow');
+      log(`   Path: ${pythonPath}`, 'yellow');
+      log(`   Packages may need to be reinstalled with this specific Python`, 'yellow');
+      log(`   Run: "${pythonPath}" -m pip install faster-whisper`, 'cyan');
+      
+      // Ask if we should reinstall
+      throw new Error('Python path validation failed - packages not accessible');
+    }
+    
+    // Lock the path
+    log(`🔒 Locked Python Path: ${pythonPath}`, 'green');
+    
+    // Save to config
+    const config = loadConfig();
+    config.PYTHON_PATH = pythonPath;
+    saveConfig(config);
+    
+    return pythonPath;
+    
+  } catch (error) {
+    log(`❌ Failed to detect and lock Python path: ${error.message}`, 'red');
+    throw error;
+  }
+}
+
+/**
+ * Get Python executable path (from config or detect)
+ */
+function getPythonPath() {
+  const config = loadConfig();
+  
+  // If we have a saved path, validate it still works
+  if (config.PYTHON_PATH && existsSync(config.PYTHON_PATH)) {
+    try {
+      // Quick validation
+      execSync(`"${config.PYTHON_PATH}" --version`, { 
+        encoding: 'utf8',
+        stdio: 'pipe',
+        timeout: 5000
+      });
+      
+      log(`✅ Using locked Python path: ${config.PYTHON_PATH}`, 'green');
+      return config.PYTHON_PATH;
+    } catch (error) {
+      log(`⚠️  Saved Python path invalid, re-detecting...`, 'yellow');
+    }
+  }
+  
+  // No saved path or invalid - detect and lock
+  return detectAndLockPythonPath();
+}
+
+/**
+ * Get Python command for execution
+ * Returns resolved path if available, otherwise falls back to 'python'
+ */
+function getPythonCommand() {
+  if (RESOLVED_PYTHON_PATH) {
+    return `"${RESOLVED_PYTHON_PATH}"`;
+  }
+  
+  // Fallback: try to get from config
+  const config = loadConfig();
+  if (config.PYTHON_PATH && existsSync(config.PYTHON_PATH)) {
+    return `"${config.PYTHON_PATH}"`;
+  }
+  
+  // Last resort: use generic command
+  log('⚠️  Using generic Python command (path not resolved)', 'yellow');
+  return 'python';
+}
+
+/**
+ * Get pip command for the resolved Python
+ */
+function getPipCommand() {
+  const pythonCmd = getPythonCommand();
+  // Use -m pip to ensure we use the correct Python's pip
+  return `${pythonCmd} -m pip`;
 }
 
 function shouldSkipInstall(forceReinstall = false) {
@@ -147,8 +336,9 @@ except Exception as e:
     try {
       log('🔍 Testing GPU (loading model on CUDA)...', 'cyan');
       let result;
+      const pythonCmd = getPythonCommand();
       try {
-        result = execSync(`python "${tempScriptPath}"`, { 
+        result = execSync(`${pythonCmd} "${tempScriptPath}"`, { 
           encoding: 'utf8',
           cwd: __dirname,
           timeout: 120000, // 120 second timeout (model download might take time on first run)
@@ -200,8 +390,9 @@ except Exception as e:
             
             // Check if libraries are already installed
             let librariesInstalled = false;
+            const pythonCmd = getPythonCommand();
             try {
-              execSync('python -c "import nvidia.cublas; import nvidia.cudnn"', { 
+              execSync(`${pythonCmd} -c "import nvidia.cublas; import nvidia.cudnn"`, { 
                 encoding: 'utf8', 
                 stdio: 'pipe' 
               });
@@ -220,8 +411,9 @@ except Exception as e:
                   execSync('nvidia-smi', { encoding: 'utf8', stdio: 'pipe' });
                   log('   ✅ NVIDIA GPU detected, installing libraries...', 'green');
                   
-                  // Install the libraries
-                  execSync('pip install nvidia-cublas-cu12 nvidia-cudnn-cu12==9.*', { stdio: 'inherit' });
+                  // Install the libraries using the resolved Python's pip
+                  const pipCmd = getPipCommand();
+                  execSync(`${pipCmd} install nvidia-cublas-cu12 nvidia-cudnn-cu12==9.*`, { stdio: 'inherit' });
                   log('   ✅ CUDA libraries installed!', 'green');
                 
                 // Configure library paths after installation
@@ -229,7 +421,7 @@ except Exception as e:
                 
                 log('   🔄 Re-testing GPU...', 'cyan');
                 // Re-run the GPU test
-                const retestResult = execSync(`python "${tempScriptPath}"`, { 
+                const retestResult = execSync(`${pythonCmd} "${tempScriptPath}"`, { 
                   encoding: 'utf8',
                   cwd: __dirname,
                   timeout: 60000,
@@ -411,6 +603,34 @@ async function checkPrerequisites(forceReinstall = false) {
     // Still need to ensure directories and files exist
     await ensureDirectoriesAndFiles();
     
+    // Load Python path from config if available
+    const config = loadConfig();
+    if (config.PYTHON_PATH && existsSync(config.PYTHON_PATH)) {
+      RESOLVED_PYTHON_PATH = config.PYTHON_PATH;
+      log(`🔒 Using locked Python path from config: ${RESOLVED_PYTHON_PATH}`, 'green');
+      
+      // Validate it can still import faster_whisper
+      if (!validatePythonPath(RESOLVED_PYTHON_PATH)) {
+        log('⚠️  Saved Python path cannot import faster_whisper', 'yellow');
+        log('   Re-detecting Python path...', 'cyan');
+        try {
+          RESOLVED_PYTHON_PATH = detectAndLockPythonPath();
+        } catch (error) {
+          log(`❌ Failed to re-detect Python: ${error.message}`, 'red');
+          return false;
+        }
+      }
+    } else {
+      // No saved path, detect and lock it
+      log('🔍 No saved Python path found, detecting...', 'cyan');
+      try {
+        RESOLVED_PYTHON_PATH = detectAndLockPythonPath();
+      } catch (error) {
+        log(`❌ Failed to detect Python: ${error.message}`, 'red');
+        return false;
+      }
+    }
+    
     // IMPORTANT: Always check and install GPU libraries if GPU is detected
     // This ensures GPU works even if libraries weren't installed initially
     try {
@@ -419,8 +639,9 @@ async function checkPrerequisites(forceReinstall = false) {
       
       // Check if libraries are installed
       let librariesInstalled = false;
+      const pythonCmd = getPythonCommand();
       try {
-        execSync('python -c "import nvidia.cublas; import nvidia.cudnn"', { 
+        execSync(`${pythonCmd} -c "import nvidia.cublas; import nvidia.cudnn"`, { 
           encoding: 'utf8', 
           stdio: 'pipe' 
         });
@@ -431,7 +652,7 @@ async function checkPrerequisites(forceReinstall = false) {
         await installGPUDependencies();
         // Verify installation succeeded
         try {
-          execSync('python -c "import nvidia.cublas; import nvidia.cudnn"', { 
+          execSync(`${pythonCmd} -c "import nvidia.cublas; import nvidia.cudnn"`, { 
             encoding: 'utf8', 
             stdio: 'pipe' 
           });
@@ -468,9 +689,14 @@ async function checkPrerequisites(forceReinstall = false) {
     return false;
   }
 
-  // Check Python version
+  // ===== PYTHON DETECTION AND PATH RESOLUTION =====
+  let pythonPath;
   try {
-    const pythonVersion = execSync('python --version', { encoding: 'utf8' }).trim();
+    log('🐍 Detecting and locking Python executable path...', 'cyan');
+    pythonPath = detectAndLockPythonPath();
+    
+    // Check Python version using resolved path
+    const pythonVersion = execSync(`"${pythonPath}" --version`, { encoding: 'utf8' }).trim();
     log(`✅ Python: ${pythonVersion}`, 'green');
     
     // Check if Python version is 3.9 or higher
@@ -483,8 +709,21 @@ async function checkPrerequisites(forceReinstall = false) {
         return false;
       }
     }
+    
+    // Validate faster_whisper is accessible (critical check)
+    log('🔍 Verifying faster_whisper is accessible...', 'cyan');
+    if (!validatePythonPath(pythonPath)) {
+      log('❌ faster_whisper not accessible from resolved Python path', 'red');
+      log(`   Python path: ${pythonPath}`, 'yellow');
+      log(`   Solution: Run "${pythonPath}" -m pip install faster-whisper`, 'cyan');
+      return false;
+    }
+    
+    // Store resolved path globally for use throughout the script
+    RESOLVED_PYTHON_PATH = pythonPath;
+    
   } catch (error) {
-    log('❌ Python not found. Please install Python 3.9 or higher.', 'red');
+    log(`❌ Python detection failed: ${error.message}`, 'red');
     return false;
   }
 
@@ -496,12 +735,14 @@ async function checkPrerequisites(forceReinstall = false) {
     log('❌ yt-dlp not found. Attempting to install...', 'yellow');
     try {
       log('📦 Installing yt-dlp via pip...', 'cyan');
-      execSync('pip install yt-dlp', { stdio: 'inherit' });
+      const pipCmd = getPipCommand();
+      execSync(`${pipCmd} install yt-dlp`, { stdio: 'inherit' });
       const ytdlpVersion = execSync('yt-dlp --version', { encoding: 'utf8' }).trim();
       log(`✅ yt-dlp installed successfully: ${ytdlpVersion}`, 'green');
     } catch (installError) {
       log('❌ Failed to install yt-dlp. Please install it manually:', 'red');
-      log('   pip install yt-dlp', 'yellow');
+      const pipCmd = getPipCommand();
+      log(`   ${pipCmd} install yt-dlp`, 'yellow');
       log('   yt-dlp is required for stream downloading functionality', 'yellow');
       return false;
     }
@@ -510,7 +751,8 @@ async function checkPrerequisites(forceReinstall = false) {
   // Quick CUDA check before full GPU test
   try {
     log('🔍 Quick CUDA check...', 'cyan');
-    const cudaCheck = execSync('python -c "import torch; print(\\"CUDA:\\", torch.cuda.is_available(), \\"Device:\\", torch.cuda.get_device_name(0) if torch.cuda.is_available() else \\"N/A\\")"', { 
+    const pythonCmd = getPythonCommand();
+    const cudaCheck = execSync(`${pythonCmd} -c "import torch; print(\\"CUDA:\\", torch.cuda.is_available(), \\"Device:\\", torch.cuda.get_device_name(0) if torch.cuda.is_available() else \\"N/A\\")"`, { 
       encoding: 'utf8',
       timeout: 10000,
       stdio: 'pipe'
@@ -628,16 +870,31 @@ async function checkPrerequisites(forceReinstall = false) {
   // Install Python dependencies
   log('📦 Installing Python dependencies (this may take a few minutes)...', 'cyan');
   try {
-    // Install faster-whisper with visible progress
-    execSync('pip install faster-whisper', { stdio: 'inherit' });
+    // Install faster-whisper with visible progress using resolved Python's pip
+    const pipCmd = getPipCommand();
+    log(`   Using: ${pipCmd}`, 'cyan');
+    execSync(`${pipCmd} install faster-whisper`, { stdio: 'inherit' });
     log('✅ faster-whisper installed successfully', 'green');
+    
+    // Verify installation with resolved Python
+    const pythonCmd = getPythonCommand();
+    log('🔍 Verifying faster-whisper installation...', 'cyan');
+    execSync(`${pythonCmd} -c "import faster_whisper; print('OK')"`, { 
+      encoding: 'utf8',
+      stdio: 'pipe',
+      timeout: 10000
+    });
+    log('✅ faster-whisper verified and accessible', 'green');
     
     // Check for NVIDIA GPU and install GPU dependencies
     await installGPUDependencies();
     
   } catch (error) {
     log('❌ Failed to install Python dependencies', 'red');
+    log(`   Error: ${error.message}`, 'yellow');
     log('   Make sure pip is installed and accessible', 'yellow');
+    const pythonCmd = getPythonCommand();
+    log(`   Try manually: ${pythonCmd} -m pip install faster-whisper`, 'cyan');
     return false;
   }
 
@@ -659,6 +916,13 @@ function markInstallationComplete() {
   config.installCompleted = true;
   config.lastInstallDate = new Date().toISOString();
   config.version = "1.0.0";
+  
+  // Ensure PYTHON_PATH is saved if we have it
+  if (RESOLVED_PYTHON_PATH) {
+    config.PYTHON_PATH = RESOLVED_PYTHON_PATH;
+    log(`🔒 Python path saved to config: ${RESOLVED_PYTHON_PATH}`, 'green');
+  }
+  
   saveConfig(config);
   log('✅ Installation marked as complete', 'green');
 }
@@ -673,9 +937,11 @@ async function installGPUDependencies() {
     log('📦 Installing NVIDIA GPU libraries (this may take a few minutes)...', 'cyan');
     
     try {
-      // Install cuBLAS and cuDNN for CUDA 12
-      execSync('pip install nvidia-cublas-cu12', { stdio: 'inherit' });
-      execSync('pip install nvidia-cudnn-cu12==9.*', { stdio: 'inherit' });
+      // Install cuBLAS and cuDNN for CUDA 12 using resolved Python's pip
+      const pipCmd = getPipCommand();
+      log(`   Using: ${pipCmd}`, 'cyan');
+      execSync(`${pipCmd} install nvidia-cublas-cu12`, { stdio: 'inherit' });
+      execSync(`${pipCmd} install nvidia-cudnn-cu12==9.*`, { stdio: 'inherit' });
       log('✅ NVIDIA GPU libraries installed successfully', 'green');
       
       // Configure library paths based on platform
@@ -694,9 +960,11 @@ async function installGPUDependencies() {
 
 async function configureGPULibraryPaths(silent = false) {
   try {
+    const pythonCmd = getPythonCommand();
+    
     // First check if libraries are installed
     try {
-      execSync('python -c "import nvidia.cublas; import nvidia.cudnn"', { 
+      execSync(`${pythonCmd} -c "import nvidia.cublas; import nvidia.cudnn"`, { 
         encoding: 'utf8', 
         stdio: 'pipe' 
       });
@@ -710,7 +978,7 @@ async function configureGPULibraryPaths(silent = false) {
     if (process.platform === 'linux') {
       // Linux configuration
       // Python 3.13+: namespace packages have __file__=None, must use __path__[0]
-      const ldPath = execSync('python3 -c "import nvidia.cublas; import nvidia.cudnn; print(nvidia.cublas.__path__[0] + \":\" + nvidia.cudnn.__path__[0])"', { encoding: 'utf8' }).trim();
+      const ldPath = execSync(`${pythonCmd} -c "import nvidia.cublas; import nvidia.cudnn; print(nvidia.cublas.__path__[0] + \":\" + nvidia.cudnn.__path__[0])"`, { encoding: 'utf8' }).trim();
       process.env.LD_LIBRARY_PATH = ldPath;
       if (!silent) log('✅ Linux GPU library paths configured', 'green');
     } else if (process.platform === 'win32') {
@@ -725,7 +993,7 @@ async function configureGPULibraryPaths(silent = false) {
         try {
           // Get cublas location - on Windows, DLLs are in 'bin' directory
           // Python 3.13+: namespace packages have __file__=None, must use __path__[0]
-          const cublasLocation = execSync('python -c "import nvidia.cublas; print(nvidia.cublas.__path__[0])"', { 
+          const cublasLocation = execSync(`${pythonCmd} -c "import nvidia.cublas; print(nvidia.cublas.__path__[0])"`, { 
             encoding: 'utf8',
             stdio: 'pipe'
           }).trim();
@@ -736,7 +1004,7 @@ async function configureGPULibraryPaths(silent = false) {
         } catch (e) {
           // Try user site-packages
           try {
-            const userSite = execSync('python -c "import site; print(site.getusersitepackages())"', { encoding: 'utf8' }).trim();
+            const userSite = execSync(`${pythonCmd} -c "import site; print(site.getusersitepackages())"`, { encoding: 'utf8' }).trim();
             const binPath = path.join(userSite, 'nvidia', 'cublas', 'bin');
             const libPath = path.join(userSite, 'nvidia', 'cublas', 'lib');
             cublasPath = existsSync(binPath) ? binPath : (existsSync(libPath) ? libPath : null);
@@ -746,7 +1014,7 @@ async function configureGPULibraryPaths(silent = false) {
         try {
           // Get cudnn location - on Windows, DLLs are in 'bin' directory
           // Python 3.13+: namespace packages have __file__=None, must use __path__[0]
-          const cudnnLocation = execSync('python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])"', { 
+          const cudnnLocation = execSync(`${pythonCmd} -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])"`, { 
             encoding: 'utf8',
             stdio: 'pipe'
           }).trim();
@@ -757,7 +1025,7 @@ async function configureGPULibraryPaths(silent = false) {
         } catch (e) {
           // Try system site-packages
           try {
-            const sysSite = execSync('python -c "import site; print(site.getsitepackages()[0])"', { encoding: 'utf8' }).trim();
+            const sysSite = execSync(`${pythonCmd} -c "import site; print(site.getsitepackages()[0])"`, { encoding: 'utf8' }).trim();
             const binPath = path.join(sysSite, 'nvidia', 'cudnn', 'bin');
             const libPath = path.join(sysSite, 'nvidia', 'cudnn', 'lib');
             cudnnPath = existsSync(binPath) ? binPath : (existsSync(libPath) ? libPath : null);
@@ -1055,7 +1323,8 @@ except Exception as e:
         print("GPU_ERROR:" + error_msg)
 `;
     
-    const result = execSync(`python -c "${testScript}"`, { 
+    const pythonCmd = getPythonCommand();
+    const result = execSync(`${pythonCmd} -c "${testScript}"`, { 
       encoding: 'utf8',
       cwd: __dirname,
       timeout: 30000 // 30 second timeout
@@ -1151,7 +1420,11 @@ async function transcribeFile() {
       let output = '';
       let errorOutput = '';
       
-      const pythonProcess = spawn('python', [PYTHON_SCRIPT, filePath], {
+      // Use resolved Python path
+      const pythonCmd = getPythonCommand();
+      const pythonExe = pythonCmd.replace(/^"|"$/g, ''); // Remove quotes for spawn
+      
+      const pythonProcess = spawn(pythonExe, [PYTHON_SCRIPT, filePath], {
         cwd: __dirname,
         stdio: ['pipe', 'pipe', 'pipe'],
         env: process.env  // CRITICAL: Pass environment variables including PATH and CUDA paths

@@ -150,9 +150,45 @@ const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const TRANSCRIPTIONS_DIR = path.join(__dirname, 'transcriptions');
 const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
 const PYTHON_SCRIPT = path.join(__dirname, 'transcribe.py');
+const CONFIG_FILE = path.join(__dirname, 'config.json');
 
 // Cache for Python executable path
 let pythonExecutable = null;
+
+/**
+ * Load Python path from config.json (set by start.js)
+ * Returns: absolute path from config, or null if not found/invalid
+ */
+function loadPythonPathFromConfig() {
+  try {
+    if (existsSync(CONFIG_FILE)) {
+      const configData = readFileSync(CONFIG_FILE, 'utf8');
+      const config = JSON.parse(configData);
+      
+      if (config.PYTHON_PATH && existsSync(config.PYTHON_PATH)) {
+        // Validate the path works
+        try {
+          execSync(`"${config.PYTHON_PATH}" --version`, {
+            encoding: 'utf8',
+            stdio: 'pipe',
+            timeout: 5000
+          });
+          
+          console.log(`🔒 Using locked Python path from config: ${config.PYTHON_PATH}`);
+          return config.PYTHON_PATH;
+        } catch (error) {
+          console.warn(`⚠️  Saved Python path invalid: ${config.PYTHON_PATH}`);
+          console.warn(`   Error: ${error.message}`);
+          console.warn(`   Falling back to detection...`);
+        }
+      }
+    }
+  } catch (error) {
+    // Config file doesn't exist or invalid - that's okay, we'll detect
+  }
+  
+  return null;
+}
 
 /**
  * Detect Python executable by trying common options and using 'where' on Windows
@@ -163,8 +199,16 @@ function detectPythonExecutable() {
     return pythonExecutable; // Return cached result
   }
   
-  // Try common Python executables in order of preference
-  const candidates = ['py', 'python3', 'python'];
+  // FIRST: Try to load from config.json (set by start.js)
+  const configPath = loadPythonPathFromConfig();
+  if (configPath) {
+    pythonExecutable = configPath;
+    return configPath;
+  }
+  
+  // FALLBACK: Try common Python executables in order of preference
+  console.log('🔍 Python path not in config, detecting...');
+  const candidates = ['python3', 'python', 'py'];
   
   for (const candidate of candidates) {
     try {
@@ -210,7 +254,24 @@ function detectPythonExecutable() {
   // None found
   console.error('❌ Python executable not found. Tried: py, python3, python');
   console.error('   Please ensure Python is installed and in your PATH');
+  console.error('   Or run start.js to lock the Python path');
   return null;
+}
+
+/**
+ * Verify Python version and log it
+ */
+function verifyPythonVersion(pythonCmd) {
+  try {
+    const version = execSync(`${pythonCmd.includes(' ') ? '"' + pythonCmd + '"' : pythonCmd} --version`, {
+      encoding: 'utf8',
+      stdio: 'pipe'
+    }).trim();
+    console.log(`🐍 Using Python: ${version}`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -642,6 +703,7 @@ if (!pythonCmd) {
   console.error('   Transcription will fail until Python is installed and in PATH.');
   console.error('   Tried: py, python3, python');
 } else {
+  verifyPythonVersion(pythonCmd);
   console.log(`✅ Python executable detected: ${pythonCmd}`);
 }
 
