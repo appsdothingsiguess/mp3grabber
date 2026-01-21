@@ -323,6 +323,30 @@ If you're upgrading from the old DOM scraping version, see [`MIGRATION_GUIDE.md`
 - Verify all dependencies installed: `npm install`
 - For Python dependencies: `pip install faster-whisper`
 
+**"Cannot find module './debug'" error**
+This error occurs when `node_modules` is corrupted or incomplete (common when copying the project to a new folder). 
+
+**Quick Fix:**
+```bash
+npm run fix
+```
+
+**Manual Fix:**
+```bash
+# Delete corrupted node_modules and lock file
+rm -rf node_modules package-lock.json
+# On Windows (PowerShell):
+# Remove-Item -Recurse -Force node_modules, package-lock.json
+
+# Clear npm cache
+npm cache clean --force
+
+# Reinstall dependencies
+npm install
+```
+
+**Important:** When copying this project to a new folder, always run `npm install` in the new location. Never copy the `node_modules` folder directly.
+
 ### Performance Tips
 
 - **GPU Acceleration**: Use NVIDIA GPU with CUDA for 4x faster processing

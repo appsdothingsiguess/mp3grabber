@@ -1506,14 +1506,47 @@ async function startRelayServer() {
   log('   Press Ctrl+C to stop the server', 'yellow');
   
   // Start the relay server
+  let stderrOutput = '';
+  let hasModuleError = false;
   const relayProcess = spawn('node', ['relay.js'], {
-    stdio: 'inherit',
+    stdio: ['inherit', 'inherit', 'pipe'],
     cwd: __dirname
+  });
+
+  // Capture stderr to detect module errors while still showing output
+  relayProcess.stderr.on('data', (data) => {
+    const output = data.toString();
+    stderrOutput += output;
+    
+    // Check for the specific debug module error
+    if ((output.includes("Cannot find module './debug'") || 
+         (output.includes("Cannot find module") && output.includes('debug'))) && !hasModuleError) {
+      hasModuleError = true;
+      // Show the error first
+      process.stderr.write(data);
+      // Then show helpful message
+      setTimeout(() => {
+        log('\n❌ Module dependency error detected!', 'red');
+        log('   This usually happens when node_modules is corrupted.', 'yellow');
+        log('   Fix it by running:', 'cyan');
+        log('   npm run fix', 'bright');
+        log('   Or manually: rm -rf node_modules package-lock.json && npm install', 'cyan');
+      }, 100);
+    } else {
+      // Forward all stderr to console
+      process.stderr.write(data);
+    }
   });
 
   relayProcess.on('error', (error) => {
     log('❌ Failed to start relay server:', 'red');
     log(error.message, 'red');
+    
+    // Check if it's a module error
+    if (error.message.includes('Cannot find module') || stderrOutput.includes('Cannot find module')) {
+      log('\n💡 This looks like a dependency issue. Try:', 'yellow');
+      log('   npm run fix', 'cyan');
+    }
   });
 
   // Handle graceful shutdown
