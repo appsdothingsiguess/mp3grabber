@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 import sys
 import os
-# stability fixes for Windows CPU
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-os.environ["OMP_NUM_THREADS"] = "1"
 import warnings
 import json
 import time
@@ -18,11 +15,10 @@ def transcribe_audio(audio_file, model_size="medium", use_gpu=True):
     try:
         # Determine device and compute type
         device = "cuda" if use_gpu else "cpu"
-        # int8 is the stable default for CPU (float32 causes access violations on Windows/ctranslate2)
+        # Use float32 for CPU to get better quality (int8 quantizes and reduces accuracy)
         # For GPU, use float16 for speed/quality balance
-        compute_type = "float16" if use_gpu else "int8"
+        compute_type = "float16" if use_gpu else "float32"
         
-        print(f"STATUS:OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS', 'not set')}", flush=True)
         print(f"STATUS:Initializing {device.upper()} processing...", flush=True)
         
         # Load model with timing
@@ -88,10 +84,11 @@ def transcribe_audio(audio_file, model_size="medium", use_gpu=True):
         }
 
 def check_gpu_availability():
-    """Check if GPU libraries are available. Handles missing torch/cuda gracefully."""
+    """Check if GPU libraries are available"""
+    # Debug: print what we're checking
     print("DEBUG:Checking GPU availability...", flush=True)
     
-    # First try torch (most reliable); tolerate missing torch entirely
+    # First try torch (most reliable)
     try:
         import torch
         print(f"DEBUG:torch imported, cuda available: {torch.cuda.is_available()}", flush=True)
@@ -100,20 +97,19 @@ def check_gpu_availability():
             return True
     except ImportError as e:
         print(f"DEBUG:torch not available: {e}", flush=True)
-    except Exception as e:
-        print(f"DEBUG:torch check failed: {e}", flush=True)
+        pass
     
     # Then try CUDA libraries
     try:
         import nvidia.cublas
         import nvidia.cudnn
         print("DEBUG:CUDA libraries imported successfully", flush=True)
+        # If we can import both, assume GPU is available
+        # The actual transcription will fallback to CPU if GPU fails
         return True
     except ImportError as e:
         print(f"DEBUG:CUDA libraries not available: {e}", flush=True)
-    except Exception as e:
-        print(f"DEBUG:CUDA lib check failed: {e}", flush=True)
-    return False
+        return False
 
 def save_transcription(transcript, audio_file, device, compute_type, language, confidence, model_size):
     """Save transcription to transcriptions folder"""
