@@ -46,11 +46,16 @@ def transcribe_audio(audio_file, model_size="medium", use_gpu=True):
         segments, info = model.transcribe(audio_file, beam_size=5)
         
         print(f"STATUS:Processing segments...", flush=True)
-        # Collect segments
+        # Collect segments with timestamps
         transcript_text = ""
         segment_count = 0
         for segment in segments:
-            transcript_text += segment.text.strip() + " "
+            start_time = segment.start
+            end_time = segment.end
+            # Format timestamps as [MM:SS.mmm]
+            start_formatted = f"[{int(start_time//60):02d}:{start_time%60:06.3f}]"
+            end_formatted = f"[{int(end_time//60):02d}:{end_time%60:06.3f}]"
+            transcript_text += f"{start_formatted} {segment.text.strip()}\n"
             segment_count += 1
             if segment_count % 10 == 0:  # Progress update every 10 segments
                 print(f"STATUS:Processed {segment_count} segments...", flush=True)
@@ -79,31 +84,19 @@ def transcribe_audio(audio_file, model_size="medium", use_gpu=True):
         }
 
 def check_gpu_availability():
-    """Check if GPU libraries are available"""
-    # Debug: print what we're checking
-    print("DEBUG:Checking GPU availability...", flush=True)
-    
-    # First try torch (most reliable)
+    """Check if GPU is usable by loading a tiny model on CUDA.
+    faster-whisper uses CTranslate2 + nvidia-cublas/cudnn — PyTorch is not required."""
     try:
-        import torch
-        print(f"DEBUG:torch imported, cuda available: {torch.cuda.is_available()}", flush=True)
-        if torch.cuda.is_available():
-            print("DEBUG:GPU available via torch.cuda", flush=True)
-            return True
-    except ImportError as e:
-        print(f"DEBUG:torch not available: {e}", flush=True)
-        pass
-    
-    # Then try CUDA libraries
-    try:
-        import nvidia.cublas
-        import nvidia.cudnn
-        print("DEBUG:CUDA libraries imported successfully", flush=True)
-        # If we can import both, assume GPU is available
-        # The actual transcription will fallback to CPU if GPU fails
+        print("STATUS:Checking GPU (loading tiny model)...", flush=True)
+        from faster_whisper import WhisperModel
+        model = WhisperModel("tiny", device="cuda", compute_type="float16")
         return True
-    except ImportError as e:
-        print(f"DEBUG:CUDA libraries not available: {e}", flush=True)
+    except ImportError:
+        return False
+    except Exception as e:
+        err = str(e).lower()
+        if any(x in err for x in ("cuda", "cudnn", "cublas", "dll", "out of memory")):
+            return False
         return False
 
 def save_transcription(transcript, audio_file, device, compute_type, language, confidence, model_size):
@@ -140,6 +133,18 @@ Language: {language} ({confidence:.1%} confidence)
     except Exception as e:
         return None
 
+def write_result_file(result, result_path):
+    """Write result JSON to disk for crash recovery."""
+    try:
+        tmp_path = result_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(result))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, result_path)
+    except OSError:
+        pass
+
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         print(json.dumps({"success": False, "error": "Usage: python transcribe.py <audio_file>"}))
@@ -164,6 +169,10 @@ if __name__ == "__main__":
         # Use CPU directly with base model
         result = transcribe_audio(audio_file, model_size="base", use_gpu=False)
     
+    # Write early result for crash recovery
+    result_path = audio_file + ".result.json"
+    write_result_file(result, result_path)
+
     # Save transcription if successful
     if result["success"]:
         output_file = save_transcription(
@@ -177,5 +186,7 @@ if __name__ == "__main__":
         )
         if output_file:
             result["output_file"] = output_file
-    
+
+    # Update result file (may now include output_file)
+    write_result_file(result, result_path)
     print(json.dumps(result))

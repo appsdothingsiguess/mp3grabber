@@ -1,4 +1,4 @@
-const WS_URL = "ws://localhost:8787";       // ← use localhost for local development
+const WS_URL = "ws://localhost:8787";
 let sock;
 
 // Establishes a WebSocket connection if one is not already open.
@@ -53,322 +53,616 @@ function connect() {
   });
 }
 
-// This function is injected into the active tab to find audio links.
-function findAudioLinks() {
-  console.log("MP3 Grabber: findAudioLinks() executed on page:", window.location.href);
+// ============================================================================
+// INTELLIGENT STREAM FILTERING SYSTEM
+// ============================================================================
+
+/**
+ * Check if URL should be ignored based on file extension or content type
+ */
+function shouldIgnoreUrl(url) {
+  const urlLower = url.toLowerCase();
   
-  const selectors = [
-    'a[href$=".mp3"]',
-    'a[href$=".m4a"]',
-    'a[href$=".wav"]',
-    'a[href$=".flac"]',
-    'a[href$=".ogg"]',
-    'a[href$=".webm"]',
-    'audio[src$=".mp3"]',
-    'audio[src$=".m4a"]',
-    'audio[src$=".wav"]',
-    'audio[src$=".flac"]',
-    'audio[src$=".ogg"]',
-    'audio[src$=".webm"]',
-    'source[src$=".mp3"]',
-    'source[src$=".m4a"]',
-    'source[src$=".wav"]',
-    'source[src$=".flac"]',
-    'source[src$=".ogg"]',
-    'source[src$=".webm"]'
-  ];
+  // Ignore subtitle/caption files
+  if (urlLower.endsWith('.vtt') || urlLower.endsWith('.srt')) {
+    console.log('🚫 [FILTER] Ignoring subtitle file:', url.substring(0, 100));
+    return true;
+  }
   
-  console.log("MP3 Grabber: Searching for selectors:", selectors);
-  const elements = document.querySelectorAll(selectors.join(', '));
-  console.log(`MP3 Grabber: Found ${elements.length} elements matching audio selectors`);
+  // Ignore encryption keys
+  if (urlLower.endsWith('.key')) {
+    console.log('🚫 [FILTER] Ignoring encryption key:', url.substring(0, 100));
+    return true;
+  }
   
-  // The `href` or `src` property provides the absolute URL.
-  const urls = Array.from(elements).map(el => {
-    const url = el.href || el.src;
-    console.log(`MP3 Grabber: Found audio element:`, {
-      tagName: el.tagName,
-      url: url,
-      href: el.href,
-      src: el.src
-    });
+  // Ignore image files
+  if (urlLower.endsWith('.png') || urlLower.endsWith('.jpg') || urlLower.endsWith('.jpeg')) {
+    console.log('🚫 [FILTER] Ignoring image file:', url.substring(0, 100));
+    return true;
+  }
+  
+  // Ignore URLs containing specific keywords
+  const ignoreKeywords = ['segment', 'fragment', 'caption', 'subtitle'];
+  for (const keyword of ignoreKeywords) {
+    if (urlLower.includes(keyword)) {
+      console.log(`🚫 [FILTER] Ignoring URL with keyword "${keyword}":`, url.substring(0, 100));
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Determine stream quality/priority
+ * Higher number = higher priority
+ */
+function getStreamPriority(url) {
+  const urlLower = url.toLowerCase();
+  
+  // Master manifests have highest priority
+  if (urlLower.includes('master.m3u8') || urlLower.includes('master_playlist')) {
+    return 100;
+  }
+  
+  // Index manifests have high priority
+  if (urlLower.includes('index.m3u8') || urlLower.includes('playlist.m3u8')) {
+    return 90;
+  }
+  
+  // MPD manifests (DASH)
+  if (urlLower.endsWith('.mpd')) {
+    return 80;
+  }
+  
+  // Regular m3u8 files
+  if (urlLower.includes('.m3u8')) {
+    return 50;
+  }
+  
+  // Other formats
+  return 10;
+}
+
+/**
+ * Extract unique identifier from URL (for deduplication)
+ */
+function extractStreamId(url) {
+  try {
+    // Try to extract Kaltura entryId if present
+    const kalturaMatch = url.match(/\/entryId\/([^\/]+)\//);
+    if (kalturaMatch) {
+      return `kaltura_${kalturaMatch[1]}`;
+    }
+    
+    // Otherwise use the base URL without query params and quality indicators
+    const urlObj = new URL(url);
+    const pathname = urlObj.pathname
+      .replace(/_(low|medium|high|[0-9]+p|[0-9]+k)/gi, '')
+      .replace(/\/(low|medium|high|[0-9]+p|[0-9]+k)\//gi, '/');
+    
+    return `${urlObj.host}${pathname}`;
+  } catch (error) {
+    console.error('🚫 [FILTER] Error extracting stream ID:', error);
     return url;
-  });
-  
-  console.log(`MP3 Grabber: Returning ${urls.length} audio URLs:`, urls);
-  return urls;
+  }
 }
 
-// YouTube-specific function to find audio/video elements
-function findYouTubeAudioLinks() {
-  console.log("MP3 Grabber: findYouTubeAudioLinks() executed on YouTube page");
+// Pending streams waiting for better quality (debounce buffer)
+const pendingStreams = new Map(); // streamId -> { url, priority, timeout, cookies, details }
+
+// Track which base URLs we've already processed (to avoid multiple quality versions)
+const processedBaseUrls = new Map(); // streamId -> { url, timestamp, priority }
+
+/**
+ * Process a detected stream with intelligent debouncing
+ * Waits 2 seconds to see if a better quality stream appears
+ */
+async function processStream(url, cookies, details) {
+  const streamId = extractStreamId(url);
+  const priority = getStreamPriority(url);
   
-  const audioUrls = [];
+  console.log('📥 [FILTER] Stream detected:', {
+    url: url.substring(0, 100) + '...',
+    streamId: streamId,
+    priority: priority
+  });
   
-  try {
-    // Look for video elements (YouTube uses video elements for audio/video)
-    const videoElements = document.querySelectorAll('video');
-    console.log(`MP3 Grabber: Found ${videoElements.length} video elements`);
+  // Check if we've already processed this stream recently
+  if (processedBaseUrls.has(streamId)) {
+    const processed = processedBaseUrls.get(streamId);
+    const timeSinceProcessed = Date.now() - processed.timestamp;
     
-    videoElements.forEach((video, index) => {
-      if (video.src) {
-        console.log(`MP3 Grabber: Video element ${index + 1} src:`, video.src);
-        audioUrls.push(video.src);
-      }
-      
-      // Check for source elements within video
-      const sources = video.querySelectorAll('source');
-      sources.forEach((source, sourceIndex) => {
-        if (source.src) {
-          console.log(`MP3 Grabber: Source element ${sourceIndex + 1} src:`, source.src);
-          audioUrls.push(source.src);
-        }
-      });
-    });
-    
-    // Look for YouTube's internal video player data
-    const videoPlayer = document.querySelector('#movie_player, .html5-video-player');
-    if (videoPlayer) {
-      console.log('MP3 Grabber: Found YouTube video player');
-      
-      // Try to access YouTube's internal video data
-      try {
-        const videoData = window.ytplayer?.config?.args || 
-                         window.ytInitialPlayerResponse ||
-                         window.ytInitialData;
-        
-        if (videoData) {
-          console.log('MP3 Grabber: Found YouTube video data');
-          
-          // Extract video URLs from YouTube's data structure
-          if (videoData.streamingData && videoData.streamingData.formats) {
-            videoData.streamingData.formats.forEach((format, index) => {
-              if (format.url) {
-                console.log(`MP3 Grabber: YouTube format ${index + 1} URL:`, format.url);
-                audioUrls.push(format.url);
-              }
-            });
-          }
-          
-          if (videoData.streamingData && videoData.streamingData.adaptiveFormats) {
-            videoData.streamingData.adaptiveFormats.forEach((format, index) => {
-              if (format.url) {
-                console.log(`MP3 Grabber: YouTube adaptive format ${index + 1} URL:`, format.url);
-                audioUrls.push(format.url);
-              }
-            });
-          }
-        }
-      } catch (error) {
-        console.log('MP3 Grabber: Could not access YouTube internal data:', error.message);
+    if (timeSinceProcessed < 60000) { // 60 second window
+      if (priority <= processed.priority) {
+        console.log('⏭️  [FILTER] Skipping - already processed better or equal stream:', {
+          current: priority,
+          processed: processed.priority
+        });
+        return;
+      } else {
+        console.log('🔄 [FILTER] Found better quality stream, replacing:', {
+          old: processed.priority,
+          new: priority
+        });
       }
     }
+  }
+  
+  // Check if we have a pending stream for this ID
+  if (pendingStreams.has(streamId)) {
+    const pending = pendingStreams.get(streamId);
     
-    // Look for blob URLs (YouTube often uses these)
-    const allElements = document.querySelectorAll('*');
-    allElements.forEach((element) => {
-      ['src', 'href'].forEach(attr => {
-        const url = element[attr];
-        if (url && url.startsWith('blob:')) {
-          console.log(`MP3 Grabber: Found blob URL:`, url);
-          audioUrls.push(url);
-        }
+    if (priority > pending.priority) {
+      // Found a better stream, replace it
+      console.log('⬆️  [FILTER] Upgrading pending stream:', {
+        oldPriority: pending.priority,
+        newPriority: priority,
+        oldUrl: pending.url.substring(0, 80),
+        newUrl: url.substring(0, 80)
       });
-    });
-    
-  } catch (error) {
-    console.error('MP3 Grabber: Error searching for YouTube audio elements:', error);
-  }
-  
-  // Remove duplicates and filter valid URLs
-  const uniqueUrls = [...new Set(audioUrls)].filter(url => {
-    return url && (
-      url.includes('youtube.com') || 
-      url.includes('googlevideo.com') ||
-      url.startsWith('blob:') ||
-      url.match(/\.(mp3|m4a|wav|flac|ogg|webm)(\?|$)/i)
-    );
-  });
-  
-  console.log(`MP3 Grabber: Found ${uniqueUrls.length} unique YouTube audio/video URLs:`, uniqueUrls);
-  return uniqueUrls;
-}
-
-chrome.commands.onCommand.addListener(async cmd => {
-  console.log(`MP3 Grabber: Command received: ${cmd}`);
-  if (cmd !== "grab-mp3") {
-    console.log(`MP3 Grabber: Ignoring command: ${cmd}`);
-    return;
-  }
-
-  console.log("MP3 Grabber: 'grab-mp3' command triggered.");
-
-  let activeSocket;
-  try {
-    console.log("MP3 Grabber: Attempting to connect to WebSocket...");
-    activeSocket = await connect();
-    console.log("MP3 Grabber: WebSocket connection successful, readyState:", activeSocket.readyState);
-  } catch (error) {
-    console.error("MP3 Grabber: WebSocket connection failed:", error);
-    console.error("MP3 Grabber: Error details:", {
-      message: error.message,
-      type: error.type,
-      target: error.target?.readyState
-    });
-    return;
-  }
-
-  console.log("MP3 Grabber: Querying for active tab...");
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  console.log("MP3 Grabber: Active tab found:", {
-    id: tab.id,
-    url: tab.url,
-    title: tab.title
-  });
-
-  // Cannot run on tabs without an ID (e.g. chrome://newtab)
-  if (!tab.id) {
-    console.log("MP3 Grabber: Active tab has no ID, aborting.");
-    return;
-  }
-
-  // Check if this is a YouTube page
-  const isYouTube = tab.url && (tab.url.includes('youtube.com') || tab.url.includes('youtu.be'));
-  
-  console.log(`MP3 Grabber: Executing script on tab ${tab.id} (${tab.url})`);
-  console.log(`MP3 Grabber: Is YouTube page: ${isYouTube}`);
-  
-  try {
-    let results;
-    
-    if (isYouTube) {
-      // For YouTube pages, try to use the content script first
-      console.log("MP3 Grabber: Attempting to communicate with YouTube content script...");
-      console.log("MP3 Grabber: Tab ID:", tab.id);
-      console.log("MP3 Grabber: Tab URL:", tab.url);
       
-      try {
-        // Inject content script and communicate immediately
-        console.log("MP3 Grabber: Injecting content script...");
-        await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          files: ['content.js']
-        });
-        console.log("MP3 Grabber: Content script injected successfully");
-        
-        // Wait briefly for script to initialize
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        // Send message to content script
-        console.log("MP3 Grabber: Sending message to content script...");
-        const response = await chrome.tabs.sendMessage(tab.id, { action: 'findAudioLinks' });
-        console.log("MP3 Grabber: Content script response:", response);
-        
-        if (response && response.success && response.audioData) {
-          console.log("MP3 Grabber: Content script succeeded, using its data");
-          results = [{ result: response.audioData }];
-        } else {
-          // Fallback to injected script
-          console.log("MP3 Grabber: Content script failed, falling back to injected script...");
-          console.log("MP3 Grabber: Response was:", response);
-          results = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            func: findYouTubeAudioLinks
-          });
-        }
-      } catch (contentScriptError) {
-        console.log("MP3 Grabber: Content script communication failed, using injected script");
-        console.log("MP3 Grabber: Error details:", contentScriptError);
-        console.log("MP3 Grabber: Error message:", contentScriptError.message);
-        console.log("MP3 Grabber: Error name:", contentScriptError.name);
-        results = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: findYouTubeAudioLinks
-        });
-      }
+      // Cancel old timeout
+      clearTimeout(pending.timeout);
+      
+      // Set new pending stream with 2-second debounce
+      const timeout = setTimeout(() => {
+        sendStreamToRelay(streamId, url, cookies, details);
+      }, 2000);
+      
+      pendingStreams.set(streamId, {
+        url: url,
+        priority: priority,
+        timeout: timeout,
+        cookies: cookies,
+        details: details
+      });
     } else {
-      // For non-YouTube pages, use the original method
-      results = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: findAudioLinks
+      console.log('⏭️  [FILTER] Pending stream is better quality, ignoring:', {
+        pending: pending.priority,
+        new: priority
       });
     }
+  } else {
+    // New stream, add to pending with 2-second debounce
+    console.log('⏳ [FILTER] Adding to pending queue (2s debounce):', {
+      streamId: streamId,
+      priority: priority
+    });
+    
+    const timeout = setTimeout(() => {
+      sendStreamToRelay(streamId, url, cookies, details);
+    }, 2000);
+    
+    pendingStreams.set(streamId, {
+      url: url,
+      priority: priority,
+      timeout: timeout,
+      cookies: cookies,
+      details: details
+    });
+  }
+}
 
-    console.log("MP3 Grabber: Script execution results:", results);
-
-    // The result from a single frame execution is in results[0].
-    if (results && results[0] && results[0].result) {
-      const audioData = results[0].result;
-      console.log(`MP3 Grabber: Found ${audioData.length} audio element(s):`, audioData);
+/**
+ * Send stream to relay server after debounce period
+ */
+async function sendStreamToRelay(streamId, url, cookies, details) {
+  console.log('🚀 [FILTER] Sending stream to relay (debounce complete):', {
+    streamId: streamId,
+    url: url.substring(0, 100) + '...'
+  });
+  
+  // Remove from pending and get priority
+  const pending = pendingStreams.get(streamId);
+  const priority = pending ? pending.priority : getStreamPriority(url);
+  pendingStreams.delete(streamId);
+  processedBaseUrls.set(streamId, { url, timestamp: Date.now(), priority });
+  
+  try {
+    // Ensure WebSocket connection is open
+    let activeSocket;
+    try {
+      activeSocket = await connect();
+    } catch (error) {
+      console.error('❌ [FILTER] Failed to connect to relay server:', error);
+      return;
+    }
+    
+    // Send stream data to relay server
+    if (activeSocket.readyState === WebSocket.OPEN) {
+      const payload = {
+        type: 'stream_found',
+        url: url,
+        cookies: cookies,
+        source: 'sniffer',
+        pageUrl: details.initiator || 'unknown',
+        timestamp: Date.now()
+      };
       
-      if (audioData.length === 0) {
-        console.log("MP3 Grabber: No audio elements found on the page.");
-        if (isYouTube) {
-          console.log("MP3 Grabber: YouTube-specific issues:");
-          console.log("  - YouTube may have updated their player structure");
-          console.log("  - Video may not be fully loaded yet");
-          console.log("  - YouTube's CSP may be blocking access");
-          console.log("  - Try refreshing the page and waiting for video to load");
-        } else {
-          console.log("MP3 Grabber: This might be because:");
-          console.log("  - The page doesn't contain direct audio file links");
-          console.log("  - Audio files are loaded dynamically via JavaScript");
-          console.log("  - The audio is embedded in a different format");
-        }
+      const message = JSON.stringify(payload);
+      activeSocket.send(message);
+      console.log('✅ [FILTER] Stream sent to relay server');
+    } else {
+      console.warn('⚠️  [FILTER] WebSocket not open, cannot send stream data');
+    }
+    
+  } catch (error) {
+    console.error('❌ [FILTER] Error sending stream to relay:', error);
+  }
+}
+
+// Clean up old entries periodically
+setInterval(() => {
+  const now = Date.now();
+  
+  // Clean up processed URLs older than 5 minutes
+  for (const [streamId, data] of processedBaseUrls.entries()) {
+    if (now - data.timestamp > 300000) {
+      processedBaseUrls.delete(streamId);
+    }
+  }
+  
+  console.log('🧹 [FILTER] Cleanup complete:', {
+    processed: processedBaseUrls.size,
+    pending: pendingStreams.size
+  });
+}, 60000); // Every minute
+
+// Network request listener for stream detection
+const filter = {
+  urls: ["<all_urls>"],
+  types: ["xmlhttprequest", "other", "media"]
+};
+
+chrome.webRequest.onBeforeRequest.addListener(
+  async (details) => {
+    const url = details.url;
+    const urlLower = url.toLowerCase();
+    
+    // Check if URL contains .m3u8 or .mpd (HLS/DASH manifests)
+    if (urlLower.includes('.m3u8') || urlLower.endsWith('.mpd')) {
+      
+      // STEP 1: Apply ignore filters
+      if (shouldIgnoreUrl(url)) {
+        return; // Filtered out, don't process
+      }
+      
+      console.log('🎯 [FILTER] Valid stream detected:', url.substring(0, 100) + '...');
+      
+      try {
+        // Extract cookies for this domain
+        const cookies = await chrome.cookies.getAll({ url: url });
+        console.log(`🍪 [FILTER] Found ${cookies.length} cookies`);
+        
+        // STEP 2: Process with intelligent debouncing and prioritization
+        await processStream(url, cookies, details);
+        
+      } catch (error) {
+        console.error('❌ [FILTER] Error processing stream:', error);
+      }
+    }
+  },
+  filter
+);
+
+/**
+ * Flush pending streams immediately (skip debounce)
+ * Used when user manually triggers download
+ */
+async function flushPendingStreams() {
+  console.log('🚀 [FILTER] Flushing pending streams (manual trigger)');
+  
+  const streamsToFlush = Array.from(pendingStreams.entries());
+  
+  for (const [streamId, pending] of streamsToFlush) {
+    // Cancel the timeout
+    clearTimeout(pending.timeout);
+    
+    // Send immediately
+    console.log(`⚡ [FILTER] Sending pending stream immediately: ${streamId}`);
+    await sendStreamToRelay(streamId, pending.url, pending.cookies, pending.details);
+  }
+  
+  console.log(`✅ [FILTER] Flushed ${streamsToFlush.length} pending stream(s)`);
+}
+
+// Optional: Manual trigger via keyboard shortcut
+chrome.commands.onCommand.addListener(async (cmd) => {
+  console.log(`🎹 [COMMAND] Command received: ${cmd}`);
+  
+  if (cmd === "grab-mp3") {
+    console.log("🎯 [COMMAND] Manual trigger - activating stream detection");
+    
+    try {
+      // Step 1: Ensure WebSocket connection
+      const activeSocket = await connect();
+      console.log("🔌 [COMMAND] WebSocket connection verified, readyState:", activeSocket.readyState);
+      
+      if (activeSocket.readyState !== WebSocket.OPEN) {
+        console.warn("⚠️  [COMMAND] WebSocket not open, cannot proceed");
         return;
       }
       
-      // Process audio data sequentially to handle blob-url conversions
-      for (let index = 0; index < audioData.length; index++) {
-        const item = audioData[index];
-        console.log(`MP3 Grabber: Processing audio element ${index + 1}/${audioData.length}:`, item);
+      // Step 2: Send ping to verify connection
+      activeSocket.send(JSON.stringify({ 
+        type: 'ping', 
+        timestamp: Date.now() 
+      }));
+      console.log("📡 [COMMAND] Ping sent to relay server");
+      
+      // Step 3: Flush any pending streams immediately (skip debounce)
+      await flushPendingStreams();
+      
+      // Step 4: Query all tabs and trigger content script search
+      try {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
         
-        if (activeSocket.readyState === WebSocket.OPEN) {
-          let message;
-          
-          if (item.type === 'blob') {
-            // Send blob data directly
-            message = JSON.stringify({ 
-              type: 'blob',
-              data: item.data,
-              mimeType: item.mimeType,
-              size: item.size,
-              originalUrl: item.originalUrl,
-              element: item.element,
-              source: isYouTube ? 'youtube' : 'web',
-              pageUrl: tab.url,
-              timestamp: Date.now()
-            });
-            console.log(`MP3 Grabber: Sending blob data (${item.size} bytes, ${item.mimeType})`);
-          } else if (item.type === 'url') {
-            // Send regular URL
-            message = JSON.stringify({ 
-              type: 'url',
-              url: item.url,
-              element: item.element,
-              quality: item.quality,
-              source: isYouTube ? 'youtube' : 'web',
-              pageUrl: tab.url,
-              timestamp: Date.now()
-            });
-            console.log(`MP3 Grabber: Sending URL: ${item.url}`);
-          }
-          
-          if (message) {
-            activeSocket.send(message);
-            console.log(`MP3 Grabber: Message sent successfully`);
-          }
-        } else {
-          console.warn(`MP3 Grabber: WebSocket not open. readyState: ${activeSocket.readyState}. Cannot send audio element:`, item);
+        if (tabs.length === 0) {
+          console.warn("⚠️  [COMMAND] No active tabs found");
+          return;
         }
+        
+        // Send message to active tab's content script
+        for (const tab of tabs) {
+          if (tab.id) {
+            console.log(`📨 [COMMAND] Sending search request to tab ${tab.id}: ${tab.url}`);
+            
+            try {
+              const response = await chrome.tabs.sendMessage(tab.id, {
+                action: 'findAudioLinks',
+                manualTrigger: true,
+                timestamp: Date.now()
+              });
+              
+              if (response && response.success) {
+                console.log(`✅ [COMMAND] Content script found ${response.audioData?.length || 0} audio/video element(s)`);
+                
+                // Process any found URLs or blob data
+                if (response.audioData && response.audioData.length > 0) {
+                  for (const audioItem of response.audioData) {
+                    // Handle blob data (already converted to base64 in content script)
+                    if (audioItem.type === 'blob' && audioItem.data) {
+                      console.log(`📦 [COMMAND] Found blob data from content script (${audioItem.size} bytes, ${audioItem.mimeType})`);
+                      
+                      try {
+                        if (activeSocket.readyState === WebSocket.OPEN) {
+                          const payload = {
+                            type: 'blob',
+                            data: audioItem.data,
+                            mimeType: audioItem.mimeType,
+                            size: audioItem.size,
+                            originalUrl: audioItem.originalUrl || 'blob:',
+                            source: 'content-script',
+                            pageUrl: tab.url || 'unknown',
+                            timestamp: Date.now()
+                          };
+                          
+                          activeSocket.send(JSON.stringify(payload));
+                          console.log(`✅ [COMMAND] Blob data sent to relay server`);
+                        }
+                      } catch (error) {
+                        console.error(`❌ [COMMAND] Error sending blob data:`, error);
+                      }
+                    }
+                    // Handle regular URLs (streams)
+                    else if (audioItem.type === 'url' && audioItem.url) {
+                      const url = audioItem.url;
+                      const urlLower = url.toLowerCase();
+                      
+                      // Check if it's a stream URL
+                      if (urlLower.includes('.m3u8') || urlLower.endsWith('.mpd')) {
+                        console.log(`🎯 [COMMAND] Found stream URL from content script: ${url.substring(0, 100)}`);
+                        
+                        // Get cookies and process
+                        try {
+                          const cookies = await chrome.cookies.getAll({ url: url });
+                          await processStream(url, cookies, {
+                            initiator: tab.url || 'unknown',
+                            tabId: tab.id
+                          });
+                        } catch (error) {
+                          console.error(`❌ [COMMAND] Error processing stream from content script:`, error);
+                        }
+                      } else {
+                        // Regular media URL (not a stream manifest)
+                        console.log(`🎵 [COMMAND] Found media URL from content script: ${url.substring(0, 100)}`);
+                        
+                        try {
+                          if (activeSocket.readyState === WebSocket.OPEN) {
+                            const payload = {
+                              type: 'url',
+                              url: url,
+                              source: 'content-script',
+                              pageUrl: tab.url || 'unknown',
+                              timestamp: Date.now()
+                            };
+                            
+                            activeSocket.send(JSON.stringify(payload));
+                            console.log(`✅ [COMMAND] Media URL sent to relay server`);
+                          }
+                        } catch (error) {
+                          console.error(`❌ [COMMAND] Error sending media URL:`, error);
+                        }
+                      }
+                    }
+                  }
+                }
+              } else {
+                console.log(`ℹ️  [COMMAND] Content script response:`, response);
+              }
+            } catch (error) {
+              // Content script might not be loaded on this page
+              console.log(`ℹ️  [COMMAND] Could not send message to tab ${tab.id}:`, error.message);
+              console.log(`   (This is normal for pages without content script support)`);
+            }
+          }
+        }
+      } catch (error) {
+        console.error("❌ [COMMAND] Error querying tabs:", error);
       }
-    } else {
-      console.log("MP3 Grabber: No audio elements found on the page.");
-      console.log("MP3 Grabber: Script execution returned:", results);
+      
+      console.log("✅ [COMMAND] Manual trigger complete");
+      
+    } catch (error) {
+      console.error("❌ [COMMAND] Failed to process manual trigger:", error);
     }
-  } catch (error) {
-    // This can happen on restricted pages like the Chrome Web Store.
-    // We can log it, but it's not a critical extension failure.
-    console.info(`MP3 Grabber: Could not execute script on ${tab.url}. This is expected for some pages.`, error.message);
-    console.info(`MP3 Grabber: Error details:`, error);
+  }
+});
+
+// Establish connection on extension load
+console.log('=' .repeat(70));
+console.log('🎵 MP3 Grabber: Background script loaded');
+console.log('🔍 Intelligent Stream Filtering: ACTIVE');
+console.log('📊 Filters:');
+console.log('   - Ignoring: .vtt, .srt, .key, .png, .jpg');
+console.log('   - Ignoring: segment, fragment, caption URLs');
+console.log('   - Prioritizing: master.m3u8, index.m3u8');
+console.log('   - Debounce: 2-second wait for better streams');
+console.log('=' .repeat(70));
+console.log('🔌 Establishing WebSocket connection...');
+connect().catch(err => {
+  console.error('❌ Initial connection failed:', err);
+  console.log('🔄 Will retry when stream is detected');
+});
+
+// Handle popup messages
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'queueAllVideos') {
+    console.log('🎯 [POPUP] Queue All Videos triggered for tab:', request.tabId);
+    
+    (async () => {
+      try {
+        const activeSocket = await connect();
+        
+        if (activeSocket.readyState !== WebSocket.OPEN) {
+          sendResponse({ success: false, error: 'WebSocket not connected' });
+          return;
+        }
+        
+        // Flush pending streams first
+        await flushPendingStreams();
+        
+        // Query the tab for videos
+        let response;
+        try {
+          response = await chrome.tabs.sendMessage(request.tabId, {
+            action: 'findAudioLinks',
+            manualTrigger: true,
+            timestamp: Date.now()
+          });
+        } catch (sendError) {
+          // Content script might not be loaded yet, try to inject it
+          if (sendError.message.includes('Could not establish connection')) {
+            console.log('🔄 [POPUP] Content script not loaded, attempting to inject...');
+            try {
+              await chrome.scripting.executeScript({
+                target: { tabId: request.tabId },
+                files: ['content.js']
+              });
+              // Wait a bit for script to initialize
+              await new Promise(resolve => setTimeout(resolve, 500));
+              // Try again
+              response = await chrome.tabs.sendMessage(request.tabId, {
+                action: 'findAudioLinks',
+                manualTrigger: true,
+                timestamp: Date.now()
+              });
+            } catch (injectError) {
+              throw new Error(`Failed to inject content script: ${injectError.message}`);
+            }
+          } else {
+            throw sendError;
+          }
+        }
+        
+        let count = 0;
+        
+        if (response && response.audioData) {
+          for (const audioItem of response.audioData) {
+            if (audioItem.type === 'url' && audioItem.url) {
+              const url = audioItem.url;
+              const urlLower = url.toLowerCase();
+              
+              if (urlLower.includes('.m3u8') || urlLower.endsWith('.mpd')) {
+                const cookies = await chrome.cookies.getAll({ url: url });
+                await processStream(url, cookies, { tabId: request.tabId });
+                count++;
+              }
+            }
+          }
+        }
+        
+        sendResponse({ success: true, count: count });
+      } catch (error) {
+        console.error('❌ [POPUP] Error queuing videos:', error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    
+    return true; // Keep message channel open
+  }
+  
+  if (request.action === 'flushAllStreams') {
+    console.log('🎯 [POPUP] Flush All Streams triggered');
+    
+    (async () => {
+      try {
+        const activeSocket = await connect();
+
+        // Clear relay's deduplication before re-queueing
+        activeSocket.send(JSON.stringify({ 
+          type: 'clear_completed', 
+          timestamp: Date.now() 
+        }));
+
+        // Give relay time to process clear command
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        if (activeSocket.readyState !== WebSocket.OPEN) {
+          sendResponse({ success: false, error: 'WebSocket not connected' });
+          return;
+        }
+        
+        // Get count of both pending AND recently processed streams
+        const pendingCount = pendingStreams.size;
+        const recentlyProcessed = Array.from(processedBaseUrls.entries())
+          .filter(([_, data]) => Date.now() - data.timestamp < 300000); // Last 5 minutes
+        
+        const totalCount = pendingCount + recentlyProcessed.length;
+        
+        if (totalCount === 0) {
+          sendResponse({ success: true, count: 0 });
+          return;
+        }
+        
+        console.log(`📦 [POPUP] Re-queueing ${recentlyProcessed.length} recently processed streams`);
+        
+        // Flush pending streams
+        await flushPendingStreams();
+        
+        // Re-queue recently processed streams
+        for (const [streamId, data] of recentlyProcessed) {
+          console.log(`🔄 [POPUP] Re-queueing: ${streamId}`);
+          await sendStreamToRelay(streamId, data.url, [], { source: 'popup-requeue' });
+        }
+        
+        sendResponse({ success: true, count: totalCount });
+      } catch (error) {
+        console.error('❌ [POPUP] Error flushing streams:', error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    
+    return true;
+  }
+  
+  if (request.action === 'manualTrigger') {
+    chrome.commands.onCommand.addListener((cmd) => {
+      if (cmd === 'grab-mp3') {
+        // Trigger existing manual logic
+      }
+    });
+    sendResponse({ success: true });
   }
 });

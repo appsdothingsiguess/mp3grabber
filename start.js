@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createInterface } from 'readline';
-import { existsSync, mkdirSync, readdirSync, writeFileSync, readFileSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync, readFileSync, unlinkSync } from 'fs';
 import { execSync, spawn } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -18,6 +18,9 @@ const TRANSCRIPTIONS_DIR = path.join(__dirname, 'transcriptions');
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const PYTHON_SCRIPT = path.join(__dirname, 'transcribe.py');
 const CONFIG_FILE = path.join(__dirname, 'config.json');
+
+// Resolved Python path (set during prerequisite check)
+let RESOLVED_PYTHON_PATH = null;
 
 // Colors for console output
 const colors = {
@@ -41,7 +44,10 @@ function question(prompt) {
   });
 }
 
-// Config management functions
+// ============================================================================
+// CONFIG MANAGEMENT
+// ============================================================================
+
 function loadConfig() {
   try {
     if (existsSync(CONFIG_FILE)) {
@@ -51,7 +57,7 @@ function loadConfig() {
   } catch (error) {
     log('⚠️  Could not load config file, using defaults', 'yellow');
   }
-  return { installCompleted: false, lastInstallDate: null, version: "1.0.0" };
+  return { installCompleted: false, lastInstallDate: null, version: "1.0.0", PYTHON_PATH: null };
 }
 
 function saveConfig(config) {
@@ -62,6 +68,189 @@ function saveConfig(config) {
     log('⚠️  Could not save config file', 'yellow');
     return false;
   }
+}
+
+// ============================================================================
+// PYTHON PATH RESOLUTION (Windows Fix)
+// ============================================================================
+
+/**
+ * Resolve absolute Python executable path
+ * Uses sys.executable to get the real path, not just "python" or "py"
+ */
+function resolvePythonPath(candidateCommand = 'python') {
+  try {
+    log(`🔍 Resolving Python path from: ${candidateCommand}`, 'cyan');
+    
+    // Try to get absolute path using sys.executable
+    const resolvedPath = execSync(
+      `"${candidateCommand}" -c "import sys; print(sys.executable)"`,
+      { 
+        encoding: 'utf8',
+        stdio: 'pipe',
+        timeout: 10000
+      }
+    ).trim();
+    
+    // Verify the path exists
+    if (!existsSync(resolvedPath)) {
+      throw new Error(`Resolved path does not exist: ${resolvedPath}`);
+    }
+    
+    log(`✅ Resolved Python path: ${resolvedPath}`, 'green');
+    return resolvedPath;
+    
+  } catch (error) {
+    // If candidate command fails, try alternatives
+    if (candidateCommand === 'python') {
+      log(`   Trying alternative: py`, 'yellow');
+      return resolvePythonPath('py');
+    } else if (candidateCommand === 'py') {
+      log(`   Trying alternative: python3`, 'yellow');
+      return resolvePythonPath('python3');
+    }
+    
+    throw new Error(`Failed to resolve Python path: ${error.message}`);
+  }
+}
+
+/**
+ * Validate Python path can import required packages
+ * Verifies faster_whisper is accessible
+ */
+function validatePythonPath(pythonPath) {
+  try {
+    log(`🔍 Validating Python path can import faster_whisper...`, 'cyan');
+    
+    execSync(
+      `"${pythonPath}" -c "import faster_whisper; print('OK')"`,
+      { 
+        encoding: 'utf8',
+        stdio: 'pipe',
+        timeout: 10000
+      }
+    );
+    
+    log(`✅ Python path validated - faster_whisper accessible`, 'green');
+    return true;
+    
+  } catch (error) {
+    log(`❌ Python path validation failed: ${error.message}`, 'red');
+    log(`   The resolved Python cannot import faster_whisper`, 'yellow');
+    log(`   This may indicate packages were installed to a different Python`, 'yellow');
+    return false;
+  }
+}
+
+/**
+ * Detect and lock Python executable path
+ * Resolves absolute path and validates package access
+ */
+function detectAndLockPythonPath() {
+  try {
+    // Try to resolve from common commands
+    let pythonPath = null;
+    
+    // Try python first
+    try {
+      pythonPath = resolvePythonPath('python');
+    } catch (error) {
+      // Try py (Windows Python Launcher)
+      try {
+        pythonPath = resolvePythonPath('py');
+      } catch (error2) {
+        // Try python3
+        try {
+          pythonPath = resolvePythonPath('python3');
+        } catch (error3) {
+          throw new Error('Could not find Python executable. Tried: python, py, python3');
+        }
+      }
+    }
+    
+    // Validate the resolved path
+    const isValid = validatePythonPath(pythonPath);
+    
+    if (!isValid) {
+      log(`⚠️  Warning: Resolved Python path cannot import faster_whisper`, 'yellow');
+      log(`   Path: ${pythonPath}`, 'yellow');
+      log(`   Packages may need to be reinstalled with this specific Python`, 'yellow');
+      log(`   Run: "${pythonPath}" -m pip install faster-whisper`, 'cyan');
+      
+      // Ask if we should reinstall
+      throw new Error('Python path validation failed - packages not accessible');
+    }
+    
+    // Lock the path
+    log(`🔒 Locked Python Path: ${pythonPath}`, 'green');
+    
+    // Save to config
+    const config = loadConfig();
+    config.PYTHON_PATH = pythonPath;
+    saveConfig(config);
+    
+    return pythonPath;
+    
+  } catch (error) {
+    log(`❌ Failed to detect and lock Python path: ${error.message}`, 'red');
+    throw error;
+  }
+}
+
+/**
+ * Get Python executable path (from config or detect)
+ */
+function getPythonPath() {
+  const config = loadConfig();
+  
+  // If we have a saved path, validate it still works
+  if (config.PYTHON_PATH && existsSync(config.PYTHON_PATH)) {
+    try {
+      // Quick validation
+      execSync(`"${config.PYTHON_PATH}" --version`, { 
+        encoding: 'utf8',
+        stdio: 'pipe',
+        timeout: 5000
+      });
+      
+      log(`✅ Using locked Python path: ${config.PYTHON_PATH}`, 'green');
+      return config.PYTHON_PATH;
+    } catch (error) {
+      log(`⚠️  Saved Python path invalid, re-detecting...`, 'yellow');
+    }
+  }
+  
+  // No saved path or invalid - detect and lock
+  return detectAndLockPythonPath();
+}
+
+/**
+ * Get Python command for execution
+ * Returns resolved path if available, otherwise falls back to 'python'
+ */
+function getPythonCommand() {
+  if (RESOLVED_PYTHON_PATH) {
+    return `"${RESOLVED_PYTHON_PATH}"`;
+  }
+  
+  // Fallback: try to get from config
+  const config = loadConfig();
+  if (config.PYTHON_PATH && existsSync(config.PYTHON_PATH)) {
+    return `"${config.PYTHON_PATH}"`;
+  }
+  
+  // Last resort: use generic command
+  log('⚠️  Using generic Python command (path not resolved)', 'yellow');
+  return 'python';
+}
+
+/**
+ * Get pip command for the resolved Python
+ */
+function getPipCommand() {
+  const pythonCmd = getPythonCommand();
+  // Use -m pip to ensure we use the correct Python's pip
+  return `${pythonCmd} -m pip`;
 }
 
 function shouldSkipInstall(forceReinstall = false) {
@@ -82,27 +271,61 @@ function shouldSkipInstall(forceReinstall = false) {
 
 async function getGPUStatus() {
   try {
-    // Write GPU test script to temporary file
+    // Write GPU test script to temporary file - actually test GPU processing
     const testScript = `import sys
 import os
+import warnings
+import signal
+warnings.filterwarnings("ignore")
 
-# Try to create a model with GPU
+# Set timeout handler
+def timeout_handler(signum, frame):
+    raise TimeoutError("GPU test timed out")
+
+# Try to create a model with GPU - just loading is enough to test
 try:
+    import numpy as np
     from faster_whisper import WhisperModel
-    import warnings
-    warnings.filterwarnings("ignore")
     
-    model = WhisperModel("base", device="cuda", compute_type="float16")
-    print("GPU_AVAILABLE:true")
+    # Try to load model on GPU - this will fail if CUDA libraries are missing
+    print("DEBUG:Attempting to load model on CUDA...", flush=True)
+    model = WhisperModel("tiny", device="cuda", compute_type="float16")
+    print("DEBUG:Model loaded on CUDA successfully", flush=True)
     
+    # Just loading the model is enough - if we get here, GPU works
+    # We don't need to transcribe empty audio (which can hang)
+    # The model loading itself uses CUDA and will fail if libraries are missing
+    
+    print("GPU_AVAILABLE:true", flush=True)
+    print("GPU_TESTED:true", flush=True)
+    print("GPU_METHOD:model_loading", flush=True)
+    
+except ImportError as import_err:
+    # Missing dependencies
+    print(f"GPU_AVAILABLE:false", flush=True)
+    print(f"GPU_ERROR:Missing dependency - {import_err}", flush=True)
 except Exception as e:
     error_msg = str(e)
-    if "CUDA" in error_msg or "cudnn" in error_msg.lower() or "cublas" in error_msg.lower() or "dll" in error_msg.lower():
-        print("GPU_AVAILABLE:false")
-        print("GPU_ERROR:" + error_msg)
+    print(f"DEBUG:Exception occurred: {error_msg}", flush=True)
+    
+    # Check if it's a CUDA-specific error
+    cuda_errors = ["CUDA", "cudnn", "cublas", "dll", "cuda", "out of memory", "cuda error", "CUDA error", "cublas64", "cudnn64"]
+    is_cuda_error = any(err.lower() in error_msg.lower() for err in cuda_errors)
+    
+    if is_cuda_error:
+        print("GPU_AVAILABLE:false", flush=True)
+        print(f"GPU_ERROR:{error_msg}", flush=True)
     else:
-        print("GPU_AVAILABLE:unknown")
-        print("GPU_ERROR:" + error_msg)`;
+        # Might be a different error, but try CPU fallback test
+        try:
+            print("DEBUG:Attempting CPU fallback test...", flush=True)
+            model_cpu = WhisperModel("tiny", device="cpu", compute_type="int8")
+            print("DEBUG:CPU model loaded successfully", flush=True)
+            print("GPU_AVAILABLE:false", flush=True)
+            print("GPU_FALLBACK:CPU works", flush=True)
+        except Exception as cpu_err:
+            print("GPU_AVAILABLE:unknown", flush=True)
+            print(f"GPU_ERROR:{error_msg} | CPU_TEST:{cpu_err}", flush=True)`;
     
     // Write script to temporary file
     const fs = await import('fs');
@@ -111,22 +334,152 @@ except Exception as e:
     fs.writeFileSync(tempScriptPath, testScript);
     
     try {
-      const result = execSync(`python "${tempScriptPath}"`, { 
-        encoding: 'utf8',
-        cwd: __dirname,
-        timeout: 30000 // 30 second timeout
-      });
-      
-      const lines = result.trim().split('\n');
-      const gpuAvailable = lines.find(line => line.startsWith('GPU_AVAILABLE:'))?.split(':')[1];
-      
-      if (gpuAvailable === 'true') {
-        return { available: true, type: 'GPU (CUDA)', color: 'green' };
-      } else if (gpuAvailable === 'false') {
-        return { available: false, type: 'CPU', color: 'yellow' };
-      } else {
-        return { available: false, type: 'CPU (GPU unclear)', color: 'yellow' };
+      log('🔍 Testing GPU (loading model on CUDA)...', 'cyan');
+      let result;
+      const pythonCmd = getPythonCommand();
+      try {
+        result = execSync(`${pythonCmd} "${tempScriptPath}"`, { 
+          encoding: 'utf8',
+          cwd: __dirname,
+          timeout: 120000, // 120 second timeout (model download might take time on first run)
+          stdio: 'pipe' // Capture both stdout and stderr
+        });
+      } catch (execError) {
+        // execSync throws on non-zero exit, but we want to see the output
+        result = execError.stdout || execError.stderr || execError.message;
+        if (result && result.toString().length > 0) {
+          log(`   Test output: ${result.toString().substring(0, 200)}`, 'yellow');
+        }
       }
+      
+      const output = result.toString();
+      const lines = output.trim().split('\n');
+      
+      // Log all output for debugging
+      const debugLines = lines.filter(line => 
+        line.includes('GPU_') || 
+        line.includes('ERROR') || 
+        line.includes('WARNING') ||
+        line.includes('CUDA') ||
+        line.includes('cuda')
+      );
+      if (debugLines.length > 0) {
+        log(`   Debug output: ${debugLines.join(' | ')}`, 'cyan');
+      }
+      
+      const gpuAvailable = lines.find(line => line.startsWith('GPU_AVAILABLE:'))?.split(':')[1]?.trim();
+      const gpuTested = lines.find(line => line.startsWith('GPU_TESTED:'))?.split(':')[1]?.trim();
+      const gpuMethod = lines.find(line => line.startsWith('GPU_METHOD:'))?.split(':').slice(1).join(':')?.trim();
+      const gpuError = lines.find(line => line.startsWith('GPU_ERROR:'))?.split(':').slice(1).join(':')?.trim();
+      const gpuFallback = lines.find(line => line.startsWith('GPU_FALLBACK:'))?.split(':').slice(1).join(':')?.trim();
+      
+      if (gpuAvailable === 'true' && gpuTested === 'true') {
+        const method = gpuMethod ? ` (${gpuMethod})` : '';
+        log(`✅ GPU test passed - CUDA acceleration confirmed${method}`, 'green');
+        return { available: true, type: 'GPU (CUDA) - Tested', color: 'green' };
+      } else if (gpuAvailable === 'false') {
+        if (gpuError) {
+          log(`⚠️  GPU test failed: ${gpuError.substring(0, 150)}`, 'yellow');
+          
+          // Check for CUDA library issues and offer to install
+          const needsCudaLibs = gpuError.includes('cublas') || gpuError.includes('cudnn') || 
+                                gpuError.includes('cublas64_12.dll') || gpuError.includes('cudnn64_12.dll');
+          
+          if (needsCudaLibs) {
+            log('   💡 Missing CUDA libraries detected', 'yellow');
+            
+            // Check if libraries are already installed
+            let librariesInstalled = false;
+            const pythonCmd = getPythonCommand();
+            try {
+              execSync(`${pythonCmd} -c "import nvidia.cublas; import nvidia.cudnn"`, { 
+                encoding: 'utf8', 
+                stdio: 'pipe' 
+              });
+              librariesInstalled = true;
+              log('   ⚠️  Libraries are installed but not found - PATH issue?', 'yellow');
+            } catch (importError) {
+              // Libraries not installed, proceed with installation
+            }
+            
+            if (!librariesInstalled) {
+              log('   📦 Attempting to install CUDA libraries automatically...', 'cyan');
+              
+              try {
+                // Check if nvidia-smi works (GPU is present)
+                try {
+                  execSync('nvidia-smi', { encoding: 'utf8', stdio: 'pipe' });
+                  log('   ✅ NVIDIA GPU detected, installing libraries...', 'green');
+                  
+                  // For CUDA 13, use nvidia-cudnn-cu13 (version-specific package)
+                  const pipCmd = getPipCommand();
+                  execSync(`${pipCmd} install nvidia-cublas`, { stdio: 'inherit' });
+                  execSync(`${pipCmd} install nvidia-cudnn-cu13`, { stdio: 'inherit' });
+                  log('   ✅ CUDA libraries installed!', 'green');
+                
+                // Configure library paths after installation
+                await configureGPULibraryPaths(true);
+                
+                log('   🔄 Re-testing GPU...', 'cyan');
+                // Re-run the GPU test
+                const retestResult = execSync(`${pythonCmd} "${tempScriptPath}"`, { 
+                  encoding: 'utf8',
+                  cwd: __dirname,
+                  timeout: 60000,
+                  env: process.env // Use updated environment with PATH
+                });
+                
+                const retestLines = retestResult.toString().trim().split('\n');
+                const retestGpuAvailable = retestLines.find(line => line.startsWith('GPU_AVAILABLE:'))?.split(':')[1]?.trim();
+                const retestGpuTested = retestLines.find(line => line.startsWith('GPU_TESTED:'))?.split(':')[1]?.trim();
+                
+                if (retestGpuAvailable === 'true' && retestGpuTested === 'true') {
+                  log('   ✅ GPU now working after installing libraries!', 'green');
+                  return { available: true, type: 'GPU (CUDA) - Tested', color: 'green' };
+                } else {
+                  log('   ⚠️  Libraries installed but GPU still not working', 'yellow');
+                  log('   💡 Try restarting the setup script or check NVIDIA drivers', 'yellow');
+                }
+              } catch (nvidiaError) {
+                log('   ⚠️  nvidia-smi not found - GPU may not be properly detected', 'yellow');
+                log('   💡 Make sure NVIDIA drivers are installed', 'yellow');
+              }
+            } catch (installError) {
+              log('   ❌ Failed to install CUDA libraries automatically', 'red');
+              log('   💡 Try manually: pip install nvidia-cublas nvidia-cudnn-cu13', 'yellow');
+            }
+            } else {
+              // Libraries installed but not working - PATH issue
+              log('   💡 Libraries are installed but not accessible', 'yellow');
+              log('   💡 Try: pip install --upgrade nvidia-cublas nvidia-cudnn-cu13', 'yellow');
+              log('   💡 Or restart your terminal/shell to refresh PATH', 'yellow');
+            }
+          } else if (gpuError.includes('out of memory')) {
+            log('   💡 GPU memory issue - try smaller model or close other GPU apps', 'yellow');
+          } else if (gpuError.includes('dll') || gpuError.includes('DLL')) {
+            log('   💡 CUDA DLL issue - check NVIDIA drivers are installed', 'yellow');
+            log('   💡 Also try: pip install nvidia-cublas nvidia-cudnn-cu13', 'yellow');
+          }
+        } else if (gpuFallback) {
+          log(`⚠️  GPU unavailable, CPU works: ${gpuFallback}`, 'yellow');
+        } else {
+          log('⚠️  GPU test failed (no error details)', 'yellow');
+        }
+        return { available: false, type: 'CPU (GPU unavailable)', color: 'yellow' };
+      } else {
+        // No GPU_AVAILABLE line found - script might have crashed
+        log('⚠️  GPU test unclear - script may have failed', 'yellow');
+        log(`   Full output: ${output.substring(0, 300)}`, 'yellow');
+        return { available: false, type: 'CPU (GPU test unclear)', color: 'yellow' };
+      }
+    } catch (execError) {
+      // If execution fails completely, show the error
+      log('⚠️  GPU test execution failed', 'yellow');
+      log(`   Error: ${execError.message}`, 'yellow');
+      if (execError.stderr) {
+        log(`   stderr: ${execError.stderr.toString().substring(0, 200)}`, 'yellow');
+      }
+      return { available: false, type: 'CPU (GPU test error)', color: 'yellow' };
     } finally {
       // Clean up temporary file
       try {
@@ -137,7 +490,7 @@ except Exception as e:
     }
     
   } catch (error) {
-    return { available: false, type: 'CPU (GPU test failed)', color: 'yellow' };
+    return { available: false, type: 'CPU (GPU test error)', color: 'yellow' };
   }
 }
 
@@ -250,10 +603,80 @@ async function checkPrerequisites(forceReinstall = false) {
   if (shouldSkipInstall(forceReinstall)) {
     // Still need to ensure directories and files exist
     await ensureDirectoriesAndFiles();
-    // IMPORTANT: Configure GPU paths every time, not just during installation
-    await configureGPULibraryPaths(true); // silent mode
+    
+    // Load Python path from config if available
+    const config = loadConfig();
+    if (config.PYTHON_PATH && existsSync(config.PYTHON_PATH)) {
+      RESOLVED_PYTHON_PATH = config.PYTHON_PATH;
+      log(`🔒 Using locked Python path from config: ${RESOLVED_PYTHON_PATH}`, 'green');
+      
+      // Validate it can still import faster_whisper
+      if (!validatePythonPath(RESOLVED_PYTHON_PATH)) {
+        log('⚠️  Saved Python path cannot import faster_whisper', 'yellow');
+        log('   Re-detecting Python path...', 'cyan');
+        try {
+          RESOLVED_PYTHON_PATH = detectAndLockPythonPath();
+        } catch (error) {
+          log(`❌ Failed to re-detect Python: ${error.message}`, 'red');
+          return false;
+        }
+      }
+    } else {
+      // No saved path, detect and lock it
+      log('🔍 No saved Python path found, detecting...', 'cyan');
+      try {
+        RESOLVED_PYTHON_PATH = detectAndLockPythonPath();
+      } catch (error) {
+        log(`❌ Failed to detect Python: ${error.message}`, 'red');
+        return false;
+      }
+    }
+    
+    // IMPORTANT: Always check and install GPU libraries if GPU is detected
+    // This ensures GPU works even if libraries weren't installed initially
+    try {
+      execSync('nvidia-smi', { encoding: 'utf8', stdio: 'pipe' });
+      log('🎮 NVIDIA GPU detected - checking GPU libraries...', 'cyan');
+      
+      // Check if libraries are installed
+      let librariesInstalled = false;
+      const pythonCmd = getPythonCommand();
+      try {
+        execSync(`${pythonCmd} -c "import nvidia.cublas; import nvidia.cudnn"`, { 
+          encoding: 'utf8', 
+          stdio: 'pipe' 
+        });
+        librariesInstalled = true;
+        log('✅ GPU libraries already installed', 'green');
+      } catch (importError) {
+        log('⚠️  GPU libraries missing - installing now...', 'yellow');
+        await installGPUDependencies();
+        // Verify installation succeeded
+        try {
+          execSync(`${pythonCmd} -c "import nvidia.cublas; import nvidia.cudnn"`, { 
+            encoding: 'utf8', 
+            stdio: 'pipe' 
+          });
+          librariesInstalled = true;
+          log('✅ GPU libraries installed successfully', 'green');
+        } catch (verifyError) {
+          log('⚠️  GPU libraries installation may have failed', 'yellow');
+        }
+      }
+      
+      // Configure paths if libraries are installed
+      if (librariesInstalled) {
+        await configureGPULibraryPaths(true); // silent mode
+      }
+    } catch (nvidiaError) {
+      // No NVIDIA GPU, skip GPU setup
+    }
+    
+    // Check GPU status - this will verify everything works
+    const gpuStatus = await getGPUStatus();
+    
     // Return GPU status for skipped installs too
-    return { success: true, gpuStatus: await getGPUStatus() };
+    return { success: true, gpuStatus: gpuStatus };
   }
   
   log('\n🔍 Checking prerequisites...', 'cyan');
@@ -267,9 +690,14 @@ async function checkPrerequisites(forceReinstall = false) {
     return false;
   }
 
-  // Check Python version
+  // ===== PYTHON DETECTION AND PATH RESOLUTION =====
+  let pythonPath;
   try {
-    const pythonVersion = execSync('python --version', { encoding: 'utf8' }).trim();
+    log('🐍 Detecting and locking Python executable path...', 'cyan');
+    pythonPath = detectAndLockPythonPath();
+    
+    // Check Python version using resolved path
+    const pythonVersion = execSync(`"${pythonPath}" --version`, { encoding: 'utf8' }).trim();
     log(`✅ Python: ${pythonVersion}`, 'green');
     
     // Check if Python version is 3.9 or higher
@@ -282,9 +710,146 @@ async function checkPrerequisites(forceReinstall = false) {
         return false;
       }
     }
+    
+    // Validate faster_whisper is accessible (critical check)
+    log('🔍 Verifying faster_whisper is accessible...', 'cyan');
+    if (!validatePythonPath(pythonPath)) {
+      log('❌ faster_whisper not accessible from resolved Python path', 'red');
+      log(`   Python path: ${pythonPath}`, 'yellow');
+      log(`   Solution: Run "${pythonPath}" -m pip install faster-whisper`, 'cyan');
+      return false;
+    }
+    
+    // Store resolved path globally for use throughout the script
+    RESOLVED_PYTHON_PATH = pythonPath;
+    
   } catch (error) {
-    log('❌ Python not found. Please install Python 3.9 or higher.', 'red');
+    log(`❌ Python detection failed: ${error.message}`, 'red');
     return false;
+  }
+
+  // Check yt-dlp
+  try {
+    const ytdlpVersion = execSync('yt-dlp --version', { encoding: 'utf8' }).trim();
+    log(`✅ yt-dlp: ${ytdlpVersion}`, 'green');
+  } catch (error) {
+    log('❌ yt-dlp not found. Attempting to install...', 'yellow');
+    try {
+      log('📦 Installing yt-dlp via pip...', 'cyan');
+      const pipCmd = getPipCommand();
+      execSync(`${pipCmd} install yt-dlp`, { stdio: 'inherit' });
+      const ytdlpVersion = execSync('yt-dlp --version', { encoding: 'utf8' }).trim();
+      log(`✅ yt-dlp installed successfully: ${ytdlpVersion}`, 'green');
+    } catch (installError) {
+      log('❌ Failed to install yt-dlp. Please install it manually:', 'red');
+      const pipCmd = getPipCommand();
+      log(`   ${pipCmd} install yt-dlp`, 'yellow');
+      log('   yt-dlp is required for stream downloading functionality', 'yellow');
+      return false;
+    }
+  }
+
+  // Quick CUDA check before full GPU test
+  try {
+    log('🔍 Quick CUDA check...', 'cyan');
+    const pythonCmd = getPythonCommand();
+    const cudaCheck = execSync(`${pythonCmd} -c "import torch; print(\\"CUDA:\\", torch.cuda.is_available(), \\"Device:\\", torch.cuda.get_device_name(0) if torch.cuda.is_available() else \\"N/A\\")"`, { 
+      encoding: 'utf8',
+      timeout: 10000,
+      stdio: 'pipe'
+    });
+    const cudaLines = cudaCheck.trim().split('\n');
+    const cudaLine = cudaLines.find(line => line.includes('CUDA:'));
+    if (cudaLine) {
+      log(`   ${cudaLine}`, 'cyan');
+    }
+  } catch (cudaCheckError) {
+    // torch may not be installed, that's okay - faster-whisper doesn't require it
+    // log('   ⚠️  Could not check CUDA (torch may not be installed)', 'yellow');
+  }
+
+  // Check ffmpeg (recommended for yt-dlp)
+  try {
+    const ffmpegVersion = execSync('ffmpeg -version', { encoding: 'utf8' }).split('\n')[0];
+    log(`✅ ffmpeg: ${ffmpegVersion}`, 'green');
+  } catch (error) {
+    log('⚠️  ffmpeg not found. Attempting to install...', 'yellow');
+    
+    const platform = process.platform;
+    let installSuccess = false;
+    
+    try {
+      if (platform === 'win32') {
+        // Try Chocolatey first (most common on Windows)
+        log('📦 Attempting to install via Chocolatey...', 'cyan');
+        try {
+          execSync('choco install ffmpeg -y', { stdio: 'inherit' });
+          installSuccess = true;
+        } catch (chocoError) {
+          log('   Chocolatey not available, trying Scoop...', 'yellow');
+          try {
+            execSync('scoop install ffmpeg', { stdio: 'inherit' });
+            installSuccess = true;
+          } catch (scoopError) {
+            log('   Scoop not available either', 'yellow');
+          }
+        }
+      } else if (platform === 'darwin') {
+        // macOS - use Homebrew
+        log('📦 Attempting to install via Homebrew...', 'cyan');
+        try {
+          execSync('brew install ffmpeg', { stdio: 'inherit' });
+          installSuccess = true;
+        } catch (brewError) {
+          log('   Homebrew not available', 'yellow');
+        }
+      } else if (platform === 'linux') {
+        // Linux - try apt first, then yum/dnf
+        log('📦 Attempting to install via package manager...', 'cyan');
+        try {
+          execSync('sudo apt-get update && sudo apt-get install -y ffmpeg', { stdio: 'inherit' });
+          installSuccess = true;
+        } catch (aptError) {
+          try {
+            execSync('sudo yum install -y ffmpeg', { stdio: 'inherit' });
+            installSuccess = true;
+          } catch (yumError) {
+            try {
+              execSync('sudo dnf install -y ffmpeg', { stdio: 'inherit' });
+              installSuccess = true;
+            } catch (dnfError) {
+              log('   No compatible package manager found', 'yellow');
+            }
+          }
+        }
+      }
+      
+      if (installSuccess) {
+        // Verify installation
+        const ffmpegVersion = execSync('ffmpeg -version', { encoding: 'utf8' }).split('\n')[0];
+        log(`✅ ffmpeg installed successfully: ${ffmpegVersion}`, 'green');
+      } else {
+        throw new Error('Auto-install failed');
+      }
+    } catch (installError) {
+      log('⚠️  Failed to auto-install ffmpeg. Manual installation required:', 'yellow');
+      log('   ffmpeg fixes stream issues and enables format conversion', 'yellow');
+      if (platform === 'win32') {
+        log('   Windows options:', 'cyan');
+        log('     1. Install Chocolatey: https://chocolatey.org/install', 'cyan');
+        log('        Then run: choco install ffmpeg', 'cyan');
+        log('     2. Or install Scoop: https://scoop.sh/', 'cyan');
+        log('        Then run: scoop install ffmpeg', 'cyan');
+        log('     3. Or download manually: https://ffmpeg.org/download.html', 'cyan');
+      } else if (platform === 'darwin') {
+        log('   Mac: Install Homebrew first: https://brew.sh/', 'cyan');
+        log('   Then run: brew install ffmpeg', 'cyan');
+      } else {
+        log('   Linux: sudo apt install ffmpeg (Debian/Ubuntu)', 'cyan');
+        log('   Or: sudo yum install ffmpeg (RHEL/CentOS)', 'cyan');
+      }
+      log('   The system will work without ffmpeg, but some streams may have issues', 'yellow');
+    }
   }
 
   // Check if package.json exists
@@ -306,24 +871,36 @@ async function checkPrerequisites(forceReinstall = false) {
   // Install Python dependencies
   log('📦 Installing Python dependencies (this may take a few minutes)...', 'cyan');
   try {
-    // Install faster-whisper with visible progress
-    execSync('pip install faster-whisper', { stdio: 'inherit' });
+    // Install faster-whisper with visible progress using resolved Python's pip
+    const pipCmd = getPipCommand();
+    log(`   Using: ${pipCmd}`, 'cyan');
+    execSync(`${pipCmd} install faster-whisper`, { stdio: 'inherit' });
     log('✅ faster-whisper installed successfully', 'green');
+    
+    // Verify installation with resolved Python
+    const pythonCmd = getPythonCommand();
+    log('🔍 Verifying faster-whisper installation...', 'cyan');
+    execSync(`${pythonCmd} -c "import faster_whisper; print('OK')"`, { 
+      encoding: 'utf8',
+      stdio: 'pipe',
+      timeout: 10000
+    });
+    log('✅ faster-whisper verified and accessible', 'green');
     
     // Check for NVIDIA GPU and install GPU dependencies
     await installGPUDependencies();
     
   } catch (error) {
     log('❌ Failed to install Python dependencies', 'red');
+    log(`   Error: ${error.message}`, 'yellow');
     log('   Make sure pip is installed and accessible', 'yellow');
+    const pythonCmd = getPythonCommand();
+    log(`   Try manually: ${pythonCmd} -m pip install faster-whisper`, 'cyan');
     return false;
   }
 
   // Create Python transcription script
   await createPythonScript();
-
-  // Verify GPU installation
-  await verifyGPUInstallation();
 
   // Create directories and files if they don't exist
   await ensureDirectoriesAndFiles();
@@ -331,7 +908,7 @@ async function checkPrerequisites(forceReinstall = false) {
   // Mark installation as complete
   markInstallationComplete();
 
-  // Return GPU status information
+  // Verify GPU installation (getGPUStatus does a thorough test, so we skip verifyGPUInstallation to avoid duplicates)
   return { success: true, gpuStatus: await getGPUStatus() };
 }
 
@@ -340,6 +917,13 @@ function markInstallationComplete() {
   config.installCompleted = true;
   config.lastInstallDate = new Date().toISOString();
   config.version = "1.0.0";
+  
+  // Ensure PYTHON_PATH is saved if we have it
+  if (RESOLVED_PYTHON_PATH) {
+    config.PYTHON_PATH = RESOLVED_PYTHON_PATH;
+    log(`🔒 Python path saved to config: ${RESOLVED_PYTHON_PATH}`, 'green');
+  }
+  
   saveConfig(config);
   log('✅ Installation marked as complete', 'green');
 }
@@ -354,9 +938,13 @@ async function installGPUDependencies() {
     log('📦 Installing NVIDIA GPU libraries (this may take a few minutes)...', 'cyan');
     
     try {
-      // Install cuBLAS and cuDNN for CUDA 12
-      execSync('pip install nvidia-cublas-cu12', { stdio: 'inherit' });
-      execSync('pip install nvidia-cudnn-cu12==9.*', { stdio: 'inherit' });
+      // For CUDA 13, use nvidia-cudnn-cu13 (version-specific package available on PyPI)
+      const pipCmd = getPipCommand();
+      log(`   Using: ${pipCmd}`, 'cyan');
+      log('   Installing nvidia-cublas...', 'cyan');
+      execSync(`${pipCmd} install nvidia-cublas`, { stdio: 'inherit' });
+      log('   Installing nvidia-cudnn-cu13 (CUDA 13)...', 'cyan');
+      execSync(`${pipCmd} install nvidia-cudnn-cu13`, { stdio: 'inherit' });
       log('✅ NVIDIA GPU libraries installed successfully', 'green');
       
       // Configure library paths based on platform
@@ -375,9 +963,25 @@ async function installGPUDependencies() {
 
 async function configureGPULibraryPaths(silent = false) {
   try {
+    const pythonCmd = getPythonCommand();
+    
+    // First check if libraries are installed
+    try {
+      execSync(`${pythonCmd} -c "import nvidia.cublas; import nvidia.cudnn"`, { 
+        encoding: 'utf8', 
+        stdio: 'pipe' 
+      });
+    } catch (importError) {
+      if (!silent) {
+        log('⚠️  GPU libraries not installed - cannot configure paths', 'yellow');
+      }
+      return; // Can't configure paths if libraries aren't installed
+    }
+    
     if (process.platform === 'linux') {
       // Linux configuration
-      const ldPath = execSync('python3 -c "import os; import nvidia.cublas; import nvidia.cudnn; print(os.path.dirname(nvidia.cublas.__file__) + \":\" + os.path.dirname(nvidia.cudnn.__file__))"', { encoding: 'utf8' }).trim();
+      // Python 3.13+: namespace packages have __file__=None, must use __path__[0]
+      const ldPath = execSync(`${pythonCmd} -c "import nvidia.cublas; import nvidia.cudnn; print(nvidia.cublas.__path__[0] + \":\" + nvidia.cudnn.__path__[0])"`, { encoding: 'utf8' }).trim();
       process.env.LD_LIBRARY_PATH = ldPath;
       if (!silent) log('✅ Linux GPU library paths configured', 'green');
     } else if (process.platform === 'win32') {
@@ -385,44 +989,102 @@ async function configureGPULibraryPaths(silent = false) {
       if (!silent) log('🔧 Configuring Windows GPU library paths...', 'yellow');
       
       try {
-        // Get the Python site-packages directory
-        const pythonPath = execSync('python -c "import site; print(site.getusersitepackages())"', { encoding: 'utf8' }).trim();
+        // Find actual library locations (they may be in different site-packages)
+        let cublasPath = null;
+        let cudnnPath = null;
         
-        // Set Windows-specific environment variables
-        const cublasPath = path.join(pythonPath, 'nvidia', 'cublas', 'lib');
-        const cudnnPath = path.join(pythonPath, 'nvidia', 'cudnn', 'lib');
+        try {
+          // Get cublas location - on Windows, DLLs are in 'bin' directory
+          // Python 3.13+: namespace packages have __file__=None, must use __path__[0]
+          const cublasLocation = execSync(`${pythonCmd} -c "import nvidia.cublas; print(nvidia.cublas.__path__[0])"`, { 
+            encoding: 'utf8',
+            stdio: 'pipe'
+          }).trim();
+          // Try 'bin' first (Windows standard), then 'lib' as fallback
+          const binPath = path.join(cublasLocation, 'bin');
+          const libPath = path.join(cublasLocation, 'lib');
+          cublasPath = existsSync(binPath) ? binPath : (existsSync(libPath) ? libPath : null);
+        } catch (e) {
+          // Try user site-packages
+          try {
+            const userSite = execSync(`${pythonCmd} -c "import site; print(site.getusersitepackages())"`, { encoding: 'utf8' }).trim();
+            const binPath = path.join(userSite, 'nvidia', 'cublas', 'bin');
+            const libPath = path.join(userSite, 'nvidia', 'cublas', 'lib');
+            cublasPath = existsSync(binPath) ? binPath : (existsSync(libPath) ? libPath : null);
+          } catch (e2) {}
+        }
         
-        // Add to PATH for current process
+        try {
+          // Get cudnn location - on Windows, DLLs are in 'bin' directory
+          // Python 3.13+: namespace packages have __file__=None, must use __path__[0]
+          const cudnnLocation = execSync(`${pythonCmd} -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])"`, { 
+            encoding: 'utf8',
+            stdio: 'pipe'
+          }).trim();
+          // Try 'bin' first (Windows standard), then 'lib' as fallback
+          const binPath = path.join(cudnnLocation, 'bin');
+          const libPath = path.join(cudnnLocation, 'lib');
+          cudnnPath = existsSync(binPath) ? binPath : (existsSync(libPath) ? libPath : null);
+        } catch (e) {
+          // Try system site-packages
+          try {
+            const sysSite = execSync(`${pythonCmd} -c "import site; print(site.getsitepackages()[0])"`, { encoding: 'utf8' }).trim();
+            const binPath = path.join(sysSite, 'nvidia', 'cudnn', 'bin');
+            const libPath = path.join(sysSite, 'nvidia', 'cudnn', 'lib');
+            cudnnPath = existsSync(binPath) ? binPath : (existsSync(libPath) ? libPath : null);
+          } catch (e2) {}
+        }
+        
+        // Verify paths exist and add whichever ones are found
+        const pathsToAdd = [];
+        if (cublasPath && existsSync(cublasPath)) {
+          pathsToAdd.push(cublasPath);
+        }
+        if (cudnnPath && existsSync(cudnnPath)) {
+          pathsToAdd.push(cudnnPath);
+        }
+        
+        if (pathsToAdd.length === 0) {
+          if (!silent) {
+            log('⚠️  GPU library directories not found', 'yellow');
+            if (cublasPath) log(`   cuBLAS: ${cublasPath} ${existsSync(cublasPath) ? '✅' : '❌'}`, 'yellow');
+            if (cudnnPath) log(`   cuDNN: ${cudnnPath} ${existsSync(cudnnPath) ? '✅' : '❌'}`, 'yellow');
+          }
+          return;
+        }
+        
+        // Add found paths to PATH for current process (and all child processes)
         if (process.env.PATH) {
-          process.env.PATH = `${cublasPath};${cudnnPath};${process.env.PATH}`;
+          process.env.PATH = `${pathsToAdd.join(';')};${process.env.PATH}`;
         } else {
-          process.env.PATH = `${cublasPath};${cudnnPath}`;
+          process.env.PATH = pathsToAdd.join(';');
         }
         
         // Set CUDA-specific environment variables
-        process.env.CUDA_PATH = process.env.CUDA_PATH || 'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.0';
+        process.env.CUDA_PATH = process.env.CUDA_PATH || 'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.1';
         process.env.CUDA_HOME = process.env.CUDA_PATH;
         
-        // Set additional Windows-specific environment variables for cuDNN
-        process.env.CUDNN_PATH = cudnnPath;
-        process.env.CUDNN_LIB_PATH = cudnnPath;
-        
-        // Add cuDNN bin directory to PATH if it exists
-        const cudnnBinPath = path.join(pythonPath, 'nvidia', 'cudnn', 'bin');
-        if (existsSync(cudnnBinPath)) {
-          process.env.PATH = `${cudnnBinPath};${process.env.PATH}`;
-          if (!silent) log(`   cuDNN bin path: ${cudnnBinPath}`, 'cyan');
+        // Set additional Windows-specific environment variables for cuDNN (if found)
+        if (cudnnPath && existsSync(cudnnPath)) {
+          process.env.CUDNN_PATH = cudnnPath;
+          process.env.CUDNN_LIB_PATH = cudnnPath;
         }
         
         if (!silent) {
           log('✅ Windows GPU library paths configured', 'green');
-          log(`   cuBLAS path: ${cublasPath}`, 'cyan');
-          log(`   cuDNN path: ${cudnnPath}`, 'cyan');
+          if (cublasPath && existsSync(cublasPath)) {
+            log(`   cuBLAS path: ${cublasPath}`, 'cyan');
+          }
+          if (cudnnPath && existsSync(cudnnPath)) {
+            log(`   cuDNN path: ${cudnnPath}`, 'cyan');
+          }
+          log(`   PATH updated for this process (${pathsToAdd.length} path(s) added)`, 'cyan');
         }
         
       } catch (pathError) {
         if (!silent) {
           log('⚠️  Could not configure Windows GPU paths automatically', 'yellow');
+          log(`   Error: ${pathError.message}`, 'yellow');
           log('   GPU may still work, but manual configuration might be needed', 'yellow');
         }
       }
@@ -430,6 +1092,7 @@ async function configureGPULibraryPaths(silent = false) {
   } catch (error) {
     if (!silent) {
       log('⚠️  GPU library path configuration failed', 'yellow');
+      log(`   Error: ${error.message}`, 'yellow');
       log('   GPU acceleration may not work properly', 'yellow');
     }
   }
@@ -484,11 +1147,16 @@ def transcribe_audio(audio_file, model_size="medium", use_gpu=True):
         segments, info = model.transcribe(audio_file, beam_size=5)
         
         print(f"STATUS:Processing segments...", flush=True)
-        # Collect segments
+        # Collect segments with timestamps
         transcript_text = ""
         segment_count = 0
         for segment in segments:
-            transcript_text += segment.text.strip() + " "
+            start_time = segment.start
+            end_time = segment.end
+            # Format timestamps as [MM:SS.mmm]
+            start_formatted = f"[{int(start_time//60):02d}:{start_time%60:06.3f}]"
+            end_formatted = f"[{int(end_time//60):02d}:{end_time%60:06.3f}]"
+            transcript_text += f"{start_formatted} {segment.text.strip()}\\n"
             segment_count += 1
             if segment_count % 10 == 0:  # Progress update every 10 segments
                 print(f"STATUS:Processed {segment_count} segments...", flush=True)
@@ -517,31 +1185,19 @@ def transcribe_audio(audio_file, model_size="medium", use_gpu=True):
         }
 
 def check_gpu_availability():
-    """Check if GPU libraries are available"""
-    # Debug: print what we're checking
-    print("DEBUG:Checking GPU availability...", flush=True)
-    
-    # First try torch (most reliable)
+    """Check if GPU is usable by loading a tiny model on CUDA.
+    faster-whisper uses CTranslate2 + nvidia-cublas/cudnn — PyTorch is not required."""
     try:
-        import torch
-        print(f"DEBUG:torch imported, cuda available: {torch.cuda.is_available()}", flush=True)
-        if torch.cuda.is_available():
-            print("DEBUG:GPU available via torch.cuda", flush=True)
-            return True
-    except ImportError as e:
-        print(f"DEBUG:torch not available: {e}", flush=True)
-        pass
-    
-    # Then try CUDA libraries
-    try:
-        import nvidia.cublas
-        import nvidia.cudnn
-        print("DEBUG:CUDA libraries imported successfully", flush=True)
-        # If we can import both, assume GPU is available
-        # The actual transcription will fallback to CPU if GPU fails
+        print("STATUS:Checking GPU (loading tiny model)...", flush=True)
+        from faster_whisper import WhisperModel
+        model = WhisperModel("tiny", device="cuda", compute_type="float16")
         return True
-    except ImportError as e:
-        print(f"DEBUG:CUDA libraries not available: {e}", flush=True)
+    except ImportError:
+        return False
+    except Exception as e:
+        err = str(e).lower()
+        if any(x in err for x in ("cuda", "cudnn", "cublas", "dll", "out of memory")):
+            return False
         return False
 
 def save_transcription(transcript, audio_file, device, compute_type, language, confidence, model_size):
@@ -578,6 +1234,18 @@ Language: {language} ({confidence:.1%} confidence)
     except Exception as e:
         return None
 
+def write_result_file(result, result_path):
+    """Write result JSON to disk for crash recovery."""
+    try:
+        tmp_path = result_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(result))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, result_path)
+    except OSError:
+        pass
+
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         print(json.dumps({"success": False, "error": "Usage: python transcribe.py <audio_file>"}))
@@ -602,6 +1270,10 @@ if __name__ == "__main__":
         # Use CPU directly with base model
         result = transcribe_audio(audio_file, model_size="base", use_gpu=False)
     
+    # Write early result for crash recovery
+    result_path = audio_file + ".result.json"
+    write_result_file(result, result_path)
+
     # Save transcription if successful
     if result["success"]:
         output_file = save_transcription(
@@ -615,7 +1287,9 @@ if __name__ == "__main__":
         )
         if output_file:
             result["output_file"] = output_file
-    
+
+    # Update result file (may now include output_file)
+    write_result_file(result, result_path)
     print(json.dumps(result))
 `;
 
@@ -658,7 +1332,8 @@ except Exception as e:
         print("GPU_ERROR:" + error_msg)
 `;
     
-    const result = execSync(`python -c "${testScript}"`, { 
+    const pythonCmd = getPythonCommand();
+    const result = execSync(`${pythonCmd} -c "${testScript}"`, { 
       encoding: 'utf8',
       cwd: __dirname,
       timeout: 30000 // 30 second timeout
@@ -754,7 +1429,11 @@ async function transcribeFile() {
       let output = '';
       let errorOutput = '';
       
-      const pythonProcess = spawn('python', [PYTHON_SCRIPT, filePath], {
+      // Use resolved Python path
+      const pythonCmd = getPythonCommand();
+      const pythonExe = pythonCmd.replace(/^"|"$/g, ''); // Remove quotes for spawn
+      
+      const pythonProcess = spawn(pythonExe, [PYTHON_SCRIPT, filePath], {
         cwd: __dirname,
         stdio: ['pipe', 'pipe', 'pipe'],
         env: process.env  // CRITICAL: Pass environment variables including PATH and CUDA paths
@@ -785,6 +1464,32 @@ async function transcribeFile() {
       });
       
       pythonProcess.on('close', (code) => {
+        // Check for Windows CUDA crash FIRST
+        if (code === 3221226505) {
+          const resultPath = filePath + '.result.json';
+          log('⚠️  Windows CUDA crash detected, attempting recovery...', 'yellow');
+          
+          // Try multiple times with delays for filesystem flush
+          for (let i = 0; i < 5; i++) {
+            if (existsSync(resultPath)) {
+              try {
+                const recovered = JSON.parse(readFileSync(resultPath, 'utf8'));
+                if (recovered && recovered.success && typeof recovered.transcript === 'string') {
+                  try { unlinkSync(resultPath); } catch (_) {}
+                  log('✅ Transcription recovered after Windows crash', 'green');
+                  resolve(recovered);
+                  return;
+                }
+              } catch (_) {}
+            }
+            // Small delay
+            const start = Date.now();
+            while (Date.now() - start < 100) {} // 100ms busy wait
+          }
+          log('❌ Recovery failed - result file not found or invalid', 'red');
+        }
+        
+        // Existing code for code === 0 and other error handling
         if (code === 0) {
           try {
             const result = JSON.parse(output.trim());
@@ -793,6 +1498,19 @@ async function transcribeFile() {
             reject(new Error('Failed to parse transcription result'));
           }
         } else {
+          // Recover result if process crashed after completing (e.g. Windows STATUS_STACK_BUFFER_OVERRUN 3221226505)
+          const resultPath = filePath + '.result.json';
+          if (existsSync(resultPath)) {
+            try {
+              const recovered = JSON.parse(readFileSync(resultPath, 'utf8'));
+              if (recovered && recovered.success && typeof recovered.transcript === 'string') {
+                try { unlinkSync(resultPath); } catch (_) {}
+                log('   (recovered from result file after process exit)', 'yellow');
+                resolve(recovered);
+                return;
+              }
+            } catch (_) {}
+          }
           reject(new Error(`Python process exited with code ${code}: ${errorOutput}`));
         }
       });
@@ -836,14 +1554,47 @@ async function startRelayServer() {
   log('   Press Ctrl+C to stop the server', 'yellow');
   
   // Start the relay server
+  let stderrOutput = '';
+  let hasModuleError = false;
   const relayProcess = spawn('node', ['relay.js'], {
-    stdio: 'inherit',
+    stdio: ['inherit', 'inherit', 'pipe'],
     cwd: __dirname
+  });
+
+  // Capture stderr to detect module errors while still showing output
+  relayProcess.stderr.on('data', (data) => {
+    const output = data.toString();
+    stderrOutput += output;
+    
+    // Check for the specific debug module error
+    if ((output.includes("Cannot find module './debug'") || 
+         (output.includes("Cannot find module") && output.includes('debug'))) && !hasModuleError) {
+      hasModuleError = true;
+      // Show the error first
+      process.stderr.write(data);
+      // Then show helpful message
+      setTimeout(() => {
+        log('\n❌ Module dependency error detected!', 'red');
+        log('   This usually happens when node_modules is corrupted.', 'yellow');
+        log('   Fix it by running:', 'cyan');
+        log('   npm run fix', 'bright');
+        log('   Or manually: rm -rf node_modules package-lock.json && npm install', 'cyan');
+      }, 100);
+    } else {
+      // Forward all stderr to console
+      process.stderr.write(data);
+    }
   });
 
   relayProcess.on('error', (error) => {
     log('❌ Failed to start relay server:', 'red');
     log(error.message, 'red');
+    
+    // Check if it's a module error
+    if (error.message.includes('Cannot find module') || stderrOutput.includes('Cannot find module')) {
+      log('\n💡 This looks like a dependency issue. Try:', 'yellow');
+      log('   npm run fix', 'cyan');
+    }
   });
 
   // Handle graceful shutdown

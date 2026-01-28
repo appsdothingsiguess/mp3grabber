@@ -8,7 +8,8 @@
     "start": "node relay.js",
     "run": "node start.js",
     "setup": "node start.js",
-    "setup:install": "node start.js -i"
+    "setup:install": "node start.js -i",
+    "fix": "node fix-dependencies.js"
   },
   "dependencies": {
     "express": "^4.19.2",
