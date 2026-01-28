@@ -143,41 +143,47 @@ function validatePythonPath(pythonPath) {
 }
 
 /**
- * Detect and lock Python executable path
- * Resolves absolute path and validates package access
+ * Resolve Python executable path only (no package validation).
+ * Use during full install when faster_whisper may not be installed yet.
  */
-function detectAndLockPythonPath() {
+function resolvePythonPathOnly() {
   try {
-    // Try to resolve from common commands
-    let pythonPath = null;
-    
-    // Try python first
     try {
-      pythonPath = resolvePythonPath('python');
+      return resolvePythonPath('python');
     } catch (error) {
-      // Try py (Windows Python Launcher)
       try {
-        pythonPath = resolvePythonPath('py');
+        return resolvePythonPath('py');
       } catch (error2) {
-        // Try python3
         try {
-          pythonPath = resolvePythonPath('python3');
+          return resolvePythonPath('python3');
         } catch (error3) {
           throw new Error('Could not find Python executable. Tried: python, py, python3');
         }
       }
     }
+  } catch (error) {
+    log(`❌ Failed to resolve Python path: ${error.message}`, 'red');
+    throw error;
+  }
+}
+
+/**
+ * Detect and lock Python executable path
+ * Resolves absolute path and validates package access
+ */
+function detectAndLockPythonPath() {
+  try {
+    const pythonPath = resolvePythonPathOnly();
     
-    // Validate the resolved path
+    // Validate the resolved path (requires faster_whisper already installed)
     const isValid = validatePythonPath(pythonPath);
     
     if (!isValid) {
       log(`⚠️  Warning: Resolved Python path cannot import faster_whisper`, 'yellow');
       log(`   Path: ${pythonPath}`, 'yellow');
       log(`   Packages may need to be reinstalled with this specific Python`, 'yellow');
-      log(`   Run: "${pythonPath}" -m pip install faster-whisper`, 'cyan');
+      log(`   Run: "${pythonPath}" -m pip install -r requirements.txt`, 'cyan');
       
-      // Ask if we should reinstall
       throw new Error('Python path validation failed - packages not accessible');
     }
     
@@ -689,11 +695,11 @@ async function checkPrerequisites(forceReinstall = false) {
     return false;
   }
 
-  // ===== PYTHON DETECTION AND PATH RESOLUTION =====
+  // ===== PYTHON DETECTION AND PATH RESOLUTION (full install: resolve only, validate after pip install) =====
   let pythonPath;
   try {
-    log('🐍 Detecting and locking Python executable path...', 'cyan');
-    pythonPath = detectAndLockPythonPath();
+    log('🐍 Resolving Python executable path...', 'cyan');
+    pythonPath = resolvePythonPathOnly();
     
     // Check Python version using resolved path
     const pythonVersion = execSync(`"${pythonPath}" --version`, { encoding: 'utf8' }).trim();
@@ -710,17 +716,9 @@ async function checkPrerequisites(forceReinstall = false) {
       }
     }
     
-    // Validate faster_whisper is accessible (critical check)
-    log('🔍 Verifying faster_whisper is accessible...', 'cyan');
-    if (!validatePythonPath(pythonPath)) {
-      log('❌ faster_whisper not accessible from resolved Python path', 'red');
-      log(`   Python path: ${pythonPath}`, 'yellow');
-      log(`   Solution: Run "${pythonPath}" -m pip install faster-whisper`, 'cyan');
-      return false;
-    }
-    
-    // Store resolved path globally for use throughout the script
+    // Store resolved path globally so pip/npm steps use it; faster_whisper is validated after pip install
     RESOLVED_PYTHON_PATH = pythonPath;
+    log(`🔒 Using Python for install: ${pythonPath}`, 'green');
     
   } catch (error) {
     log(`❌ Python detection failed: ${error.message}`, 'red');
@@ -867,14 +865,20 @@ async function checkPrerequisites(forceReinstall = false) {
     return false;
   }
 
-  // Install Python dependencies
-  log('📦 Installing Python dependencies (this may take a few minutes)...', 'cyan');
+  // Install Python dependencies from requirements.txt
+  const requirementsPath = path.join(__dirname, 'requirements.txt');
+  log('📦 Installing Python dependencies from requirements.txt (this may take a few minutes)...', 'cyan');
   try {
-    // Install faster-whisper with visible progress using resolved Python's pip
     const pipCmd = getPipCommand();
     log(`   Using: ${pipCmd}`, 'cyan');
-    execSync(`${pipCmd} install faster-whisper`, { stdio: 'inherit' });
-    log('✅ faster-whisper installed successfully', 'green');
+    if (existsSync(requirementsPath)) {
+      execSync(`${pipCmd} install -r "${requirementsPath}"`, { stdio: 'inherit', cwd: __dirname });
+      log('✅ Python dependencies from requirements.txt installed successfully', 'green');
+    } else {
+      log('   requirements.txt not found, installing faster-whisper only', 'yellow');
+      execSync(`${pipCmd} install faster-whisper`, { stdio: 'inherit' });
+      log('✅ faster-whisper installed successfully', 'green');
+    }
     
     // Verify installation with resolved Python
     const pythonCmd = getPythonCommand();
@@ -894,7 +898,7 @@ async function checkPrerequisites(forceReinstall = false) {
     log(`   Error: ${error.message}`, 'yellow');
     log('   Make sure pip is installed and accessible', 'yellow');
     const pythonCmd = getPythonCommand();
-    log(`   Try manually: ${pythonCmd} -m pip install faster-whisper`, 'cyan');
+    log(`   Try manually: ${pythonCmd} -m pip install -r requirements.txt`, 'cyan');
     return false;
   }
 
@@ -1505,12 +1509,21 @@ async function startRelayServer() {
   log('   The server will run on http://localhost:8787', 'yellow');
   log('   Press Ctrl+C to stop the server', 'yellow');
   
-  // Start the relay server
+  // Pass the validated Python path so relay uses the same interpreter (avoids PyManager/other PATH Pythons)
+  const config = loadConfig();
+  const pythonPath = RESOLVED_PYTHON_PATH || config.PYTHON_PATH;
+  const relayEnv = { ...process.env };
+  if (pythonPath && existsSync(pythonPath)) {
+    relayEnv.MP3GRABBER_PYTHON_PATH = pythonPath;
+    log(`   Python for transcription: ${pythonPath}`, 'cyan');
+  }
+  
   let stderrOutput = '';
   let hasModuleError = false;
   const relayProcess = spawn('node', ['relay.js'], {
     stdio: ['inherit', 'inherit', 'pipe'],
-    cwd: __dirname
+    cwd: __dirname,
+    env: relayEnv
   });
 
   // Capture stderr to detect module errors while still showing output

@@ -199,7 +199,20 @@ function detectPythonExecutable() {
     return pythonExecutable; // Return cached result
   }
   
-  // FIRST: Try to load from config.json (set by start.js)
+  // HIGHEST PRIORITY: Path passed by start.js when launching relay (ensures same Python as setup)
+  const envPath = process.env.MP3GRABBER_PYTHON_PATH;
+  if (envPath && existsSync(envPath)) {
+    try {
+      execSync(`"${envPath}" --version`, { encoding: 'utf8', stdio: 'pipe', timeout: 5000 });
+      pythonExecutable = envPath;
+      console.log(`🔒 Using Python from start.js: ${envPath}`);
+      return envPath;
+    } catch (e) {
+      console.warn(`⚠️  MP3GRABBER_PYTHON_PATH invalid: ${envPath}`);
+    }
+  }
+  
+  // SECOND: Try to load from config.json (set by start.js)
   const configPath = loadPythonPathFromConfig();
   if (configPath) {
     pythonExecutable = configPath;
@@ -520,11 +533,15 @@ function transcribe(file, forceCPU = false) {
         // Check for CUDA errors in stderr before parsing
         let result;
         try {
-            // Set environment variable to force CPU if needed
-            // Inherit current process.env which already has GPU paths configured at startup
+            // Set environment variables for Python subprocess
             const pythonEnv = { ...process.env };
             if (forceCPU) {
                 pythonEnv.FORCE_CPU = '1';
+            }
+            // Windows: reduce ONNX/OpenMP crashes during model load (faster-whisper#1169, #967)
+            if (process.platform === 'win32') {
+                pythonEnv.ORT_DISABLE_CPU_AFFINITY = '1';
+                pythonEnv.OMP_NUM_THREADS = pythonEnv.OMP_NUM_THREADS || '1';
             }
             
             const pythonCmd = getQuotedPythonCmd();
@@ -539,22 +556,34 @@ function transcribe(file, forceCPU = false) {
                 env: pythonEnv
             });
         } catch (execError) {
-            // Check if it's a CUDA error
             const errorOutput = (execError.stderr || execError.stdout || execError.message || '').toString();
+            const status = execError.status != null ? execError.status : execError.code;
+            // Windows exit 3221225477 = 0xC0000005 = ACCESS_VIOLATION (often wrong Python or crash during model load)
+            const isAccessViolation = status === 3221225477;
             const isCudaError = errorOutput.includes('cudnn') || 
                                errorOutput.includes('cublas') || 
                                errorOutput.includes('cudnn_ops64_9.dll') ||
                                errorOutput.includes('cublas64_12.dll') ||
                                errorOutput.includes('Invalid handle') ||
-                               execError.status === 3221226505; // Windows access violation (DLL error)
+                               status === 3221226505; // Windows DLL error
             
+            if (isAccessViolation && !forceCPU) {
+                console.error(`⚠️  Transcription process crashed (access violation). Often caused by using a different Python than setup.`);
+                console.log(`💡 Retrying with CPU mode...`);
+                return transcribe(file, true);
+            }
             if (isCudaError && !forceCPU) {
                 console.error(`⚠️  CUDA error detected: ${errorOutput.substring(0, 200)}`);
                 console.log(`💡 Retrying with CPU mode...`);
-                // Retry with CPU mode
                 return transcribe(file, true);
             }
-            // Re-throw other errors or if already in CPU mode
+            if (isAccessViolation && forceCPU) {
+                console.error(`❌ Transcription crashed during model load (Windows access violation).`);
+                console.error(`   transcribe.py sets ORT_DISABLE_CPU_AFFINITY and OMP_NUM_THREADS to reduce this. If it still fails:`);
+                console.error(`   1) Clear the model cache: %USERPROFILE%\\.cache\\huggingface\\hub (then re-run; model will re-download)`);
+                console.error(`   2) Run transcribe.py directly to test: python transcribe.py "<path-to-audio>"`);
+                console.error(`   3) Try: pip install faster-whisper==1.0.3 (older version sometimes avoids the crash)`);
+            }
             throw execError;
         }
         
